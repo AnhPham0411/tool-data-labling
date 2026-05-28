@@ -345,7 +345,7 @@ def run_annotation(system_prompt: str, article_prompt: str,
         _click_send(claude_page, log_fn)
 
         # Đợi Claude ack — thường 10-20s, dùng ack_mode để lấy text thường (không cần JSON)
-        r1 = _wait_response(claude_page, timeout=90, log_fn=log_fn, ack_mode=True)
+        r1 = _wait_response(claude_page, timeout=30, log_fn=log_fn, ack_mode=True)
         log_fn(f"Claude confirm: {r1[:100] if r1 else '(không lấy được text — tiếp tục)'}")
 
         # === STEP 2: Gửi URL riêng để trigger web fetch ===
