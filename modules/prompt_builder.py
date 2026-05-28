@@ -78,17 +78,29 @@ def build_article_prompt(article: dict, ref: dict,
     total_claims = claim_idx
 
     # ── Block URL nguồn ──────────────────────────────────────────────────────
-    # URL đã được gửi riêng trước message này để Claude fetch tự động.
-    # Ở đây chỉ liệt kê lại URL để Claude dùng cho fact_check_source_url.
-    if urls:
-        url_lines = "\n".join(f"[{i+1}] {u}" for i, u in enumerate(urls))
-        url_section = f"""URL NGUỒN (đã gửi để đọc ở message trước — {len(urls)} URL):
-Dùng đúng các URL dưới đây cho fact_check_source_url, KHÔNG tự bịa URL khác.
+    url_status = ref.get("url_status", {})
 
-{url_lines}"""
+    if urls:
+        # Mỗi URL trên 1 dòng riêng biệt — Claude.ai nhận diện URL standalone để fetch
+        url_lines_list = []
+        for u in urls:
+            status = url_status.get(u, "")
+            if status and not status.startswith("OK"):
+                url_lines_list.append(f"{u}  ← [{status}]")
+            else:
+                url_lines_list.append(u)
+        url_lines = "\n".join(url_lines_list)
+        url_section = f"""URL NGUỒN ({len(urls)} URL — hãy mở và đọc từng URL trước khi fact-check):
+
+{url_lines}
+
+Lưu ý:
+- URL đánh dấu [KHÔNG TRUY CẬP] hoặc [HTTP_xxx] → không đọc được, cần tìm thêm nguồn thay thế
+- Chỉ dùng URL từ danh sách trên cho fact_check_source_url — KHÔNG tự bịa URL khác
+- Khi tính SQ: đánh giá nguồn tốt nhất tìm được (bao gồm nguồn tìm thêm qua search), ghi tên miền vào notes"""
     else:
         url_section = """URL NGUỒN: (không có)
-Đặt fact_check_source_url = "" và fact_check_status = "KHONG TIM THAY" cho các claim không verify được."""
+Đặt fact_check_source_url = "" and fact_check_status = "KHONG TIM THAY" cho các claim không verify được."""
 
     return f"""TIÊU ĐỀ BÀI: {title}
 

@@ -19,8 +19,10 @@ _NAVY = PatternFill("solid", fgColor="FF1F3864")   # IDENTITY (A-F)
 _RED  = PatternFill("solid", fgColor="FFC00000")   # FACT-CHECK (G, H)
 _BLUE = PatternFill("solid", fgColor="FF2E75B6")   # METRICS (I-L)
 _GRAY = PatternFill("solid", fgColor="FF374151")   # ANNOTATION INFO (M-O)
-_DATABG  = PatternFill("solid", fgColor="FFEBF8FF") # nền data rows
-_STTBG   = PatternFill("solid", fgColor="FFF2F2F2") # nền cột STT
+_DATABG    = PatternFill("solid", fgColor="FFEBF8FF") # nền data rows
+_STTBG     = PatternFill("solid", fgColor="FFF2F2F2") # nền cột STT
+_REVIEWBG  = PatternFill("solid", fgColor="FFFFF2CC") # nền dòng cần review (vàng nhạt)
+_REVIEWSTT = PatternFill("solid", fgColor="FFFFC000") # ô STT dòng cần review (cam)
 
 # ── Độ rộng cột A-O ───────────────────────────────────────────────────────────
 _COL_WIDTHS = [5, 20, 16, 20, 12, 48, 18, 32, 9, 9, 9, 9, 40, 11, 14]
@@ -58,6 +60,27 @@ _TEMPLATE_VALS = [
     "[ANT-xx]",
     "[date]",
 ]
+
+
+def _needs_review(row_data: list) -> bool:
+    """
+    Trả True nếu dòng cần người review kiểm lại.
+    Điều kiện: status KHONG TIM THAY, SC < 0.35, hoặc |SF - SC| > 0.4
+    row_data[6]=status, row_data[8]=SF, row_data[9]=SC (0-based, trước khi gán STT)
+    """
+    try:
+        status = str(row_data[6]) if row_data[6] else ""
+        if status == "KHONG TIM THAY":
+            return True
+        sf = float(row_data[8]) if row_data[8] not in ("", None) else None
+        sc = float(row_data[9]) if row_data[9] not in ("", None) else None
+        if sc is not None and sc < 0.35:
+            return True
+        if sf is not None and sc is not None and abs(sf - sc) > 0.4:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return False
 
 
 def _col_fill(col: int) -> PatternFill:
@@ -182,16 +205,21 @@ def append_rows(rows: list[list], log_fn=print) -> str:
         data_row = list(row_data)
         data_row[0] = stt + i
 
+        review = _needs_review(row_data)
+        row_bg = _REVIEWBG if review else _DATABG
+        stt_bg = _REVIEWSTT if review else _STTBG
+
         for col, val in enumerate(data_row, 1):
             cell = ws.cell(row=r, column=col)
-            bg   = _STTBG if col == 1 else _DATABG
+            bg   = stt_bg if col == 1 else row_bg
 
             if col in {9, 10, 11, 12}:   # SF/SC/HR/SQ — bold, center
                 _data(cell, val, bold=True, size=10, fill=bg, h_align="center")
             elif col == 8:                # URL — màu xanh link
                 _data(cell, val, size=8, color="FF0563C1", fill=bg)
-            elif col == 1:                # STT — xám, center
-                _data(cell, val, size=9, color="FF888888", fill=bg, h_align="center")
+            elif col == 1:                # STT — cam nếu review, xám nếu bình thường
+                color = "FF7F3F00" if review else "FF888888"
+                _data(cell, val, size=9, bold=review, color=color, fill=bg, h_align="center")
             else:
                 _data(cell, val, fill=bg)
 

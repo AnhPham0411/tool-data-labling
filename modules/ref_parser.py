@@ -5,8 +5,10 @@ Chỉ dùng PyMuPDF hyperlink annotation (không dùng regex hay pdfplumber).
 Lý do: regex bắt nhầm URL inline trong text, pdfplumber thêm noise.
 """
 import os
-import re
 import fitz  # PyMuPDF
+import urllib.request
+import urllib.error
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 EXCLUDED_DOMAINS = [
     "portal.v-app.vn",
@@ -19,13 +21,42 @@ EXCLUDED_DOMAINS = [
 ]
 
 
+def check_urls_reachability(urls: list, timeout: int = 3) -> dict:
+    """
+    Kiểm tra HTTP status của từng URL song song.
+    Trả về {url: "OK (200)" | "HTTP_404" | "KHÔNG TRUY CẬP" | "LỖI"}.
+    Dùng để đánh dấu URL không khả dụng trước khi gửi Claude.
+    """
+    def _check(url):
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "Mozilla/5.0"}
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return url, f"OK ({resp.status})"
+        except urllib.error.HTTPError as e:
+            return url, f"HTTP_{e.code}"
+        except urllib.error.URLError:
+            return url, "KHÔNG TRUY CẬP"
+        except Exception:
+            return url, "LỖI"
+
+    result = {}
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        futures = {ex.submit(_check, u): u for u in urls}
+        for f in as_completed(futures):
+            url, status = f.result()
+            result[url] = status
+    return result
+
+
 def parse_ref(pdf_path: str) -> dict:
     """
     Trích xuất URL từ file Ref PDF qua PyMuPDF hyperlink.
-    Trả về: {urls: [...], url_count: int}
+    Trả về: {urls: [...], url_count: int, url_status: {url: status}}
     """
     if not pdf_path or not os.path.exists(pdf_path):
-        return {"urls": [], "url_count": 0}
+        return {"urls": [], "url_count": 0, "url_status": {}}
 
     seen, urls = set(), []
     doc = fitz.open(pdf_path)
@@ -44,7 +75,8 @@ def parse_ref(pdf_path: str) -> dict:
                 urls.append(uri)
     doc.close()
 
-    return {"urls": urls, "url_count": len(urls)}
+    url_status = check_urls_reachability(urls)
+    return {"urls": urls, "url_count": len(urls), "url_status": url_status}
 
 
 # ── Legacy — main cũ gọi parse_ref(stt, data_dir) ───────────────────────────
