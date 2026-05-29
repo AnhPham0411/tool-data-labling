@@ -11,8 +11,18 @@ import re
 from collections import Counter
 import fitz  # PyMuPDF
 
-HEADING_SIZE_FALLBACK = 16.5
-SKIP_SECTIONS = {"Tóm tắt nhanh"}
+HEADING_RATIO = 1.3       # heading phải lớn hơn body ít nhất bao nhiêu lần
+SKIP_SECTIONS = {"Tóm tắt nhanh", "Tóm tắt"}
+SKIP_SECTIONS_MED = {"Lưu ý y tế", "Lưu ý", "Disclaimer"}  # disclaimer đầu/cuối bài y tế
+
+# Regex citation theo từng format
+_RE_CIT_LAW = re.compile(r"\[(\d+)\]")
+# Med: match cả nhóm [...] chứa ít nhất 1 src_xxx, vd: [src_vinmec_com_000, src_canhgiac_013]
+_RE_CIT_MED_GROUP = re.compile(r"\[src_[^\]]+\]")
+# Extract từng số cuối trong 1 nhóm med, vd "000" "004" từ "[src_vinmec_com_000, src_x_004]"
+_RE_CIT_MED_NUM   = re.compile(r"src_[a-z0-9_]+_(\d+)")
+# Strip toàn bộ nhóm citation med khỏi text
+_RE_CIT_MED_STRIP = re.compile(r"\s*\[src_[^\]]+\]")
 
 DOMAIN_MAP = {
     "law": "Pháp luật",
@@ -32,28 +42,58 @@ DOMAIN_MAP = {
 
 _DOMAIN_KEYWORDS = {
     "law": ["luật","nghị định","thông tư","quyết định","pháp lý","pháp luật",
-            "hành chính","khiếu nại","tố cáo","xử phạt","thủ tục","hồ sơ",
-            "giấy phép","đăng ký","công chứng","thuế","hải quan","tư pháp",
-            "điều khoản","hiệu lực","văn bản","quy định"],
-    "med": ["bệnh","triệu chứng","điều trị","thuốc","vaccine","tiêm",
+            "khiếu nại","tố cáo","xử phạt","thủ tục hành chính","hồ sơ",
+            "giấy phép","công chứng","hải quan","tư pháp",
+            "điều khoản","hiệu lực","văn bản pháp luật","vi phạm","chế tài"],
+    "med": ["bệnh","triệu chứng","điều trị","thuốc","vaccine","tiêm chủng",
             "bác sĩ","bệnh viện","y tế","sức khỏe","phòng ngừa","chẩn đoán",
-            "dược","liều","phẫu thuật","xét nghiệm","ung thư","tiểu đường",
-            "huyết áp","tim mạch","nhi khoa","sản khoa"],
-    "trv": ["du lịch","điểm đến","tham quan","vé","giờ mở cửa","khách sạn",
-            "tour","lữ hành","visa","hộ chiếu","đặt phòng","ẩm thực",
-            "đặc sản","di tích","danh lam","thắng cảnh","resort","lịch trình"],
+            "dược","liều dùng","phẫu thuật","xét nghiệm","ung thư","tiểu đường",
+            "huyết áp","tim mạch","nhi khoa","sản khoa","khớp","nội khoa"],
+    "trv": ["du lịch","điểm đến","tham quan","khách sạn","tour","lữ hành",
+            "visa","hộ chiếu","đặt phòng","ẩm thực địa phương",
+            "đặc sản","di tích","danh lam thắng cảnh","resort","lịch trình du lịch",
+            "check-in","homestay","cáp treo"],
     "fin": ["tài chính","ngân hàng","lãi suất","đầu tư","chứng khoán",
-            "cổ phiếu","tín dụng","vay","bảo hiểm","kinh tế vĩ mô"],
-    "gov": ["chính phủ","bộ","ủy ban","hội đồng nhân dân","chính trị",
-            "ngoại giao","quan hệ quốc tế"],
+            "cổ phiếu","tín dụng","vay vốn","bảo hiểm","kinh tế vĩ mô",
+            "thuế","kế toán","kiểm toán","tiết kiệm","quỹ đầu tư","crypto"],
+    "gov": ["chính phủ","ủy ban nhân dân","hội đồng nhân dân","chính sách công",
+            "thủ tướng","bộ trưởng","ngoại giao","quan hệ quốc tế",
+            "cải cách hành chính","bầu cử","đảng","nhà nước"],
+    "edu": ["giáo dục","học sinh","sinh viên","trường","giảng viên","giáo viên",
+            "chương trình học","đại học","cao đẳng","tuyển sinh","học bổng",
+            "kỹ năng","hướng nghiệp","sư phạm","đào tạo"],
+    "sci": ["khoa học","công nghệ","nghiên cứu","phần mềm","lập trình","trí tuệ nhân tạo",
+            "ai","dữ liệu","robot","kỹ thuật","công nghiệp","nông nghiệp","sinh học",
+            "vũ trụ","vật lý","hóa học","điện tử"],
+    "biz": ["kinh doanh","doanh nghiệp","startup","khởi nghiệp","marketing",
+            "thương hiệu","quản trị","nhân sự","chiến lược","thị trường",
+            "doanh thu","lợi nhuận","quản lý dự án","bán hàng"],
+    "cul": ["văn hóa","phong tục","tín ngưỡng","lễ hội","nghệ thuật","âm nhạc",
+            "điện ảnh","văn học","ngôn ngữ","dân tộc","tôn giáo","triết học",
+            "truyền thống","bản sắc"],
+    "his": ["lịch sử","địa lý","địa danh","di sản","di tích lịch sử","chiến tranh",
+            "triều đại","thời kỳ","vương quốc","địa hình","sông núi","dân số"],
+    "re":  ["bất động sản","nhà đất","căn hộ","chung cư","quy hoạch","đô thị",
+            "xây dựng","kiến trúc","nội thất","hạ tầng","mặt bằng","sàn giao dịch"],
+    "env": ["môi trường","khí hậu","ô nhiễm","năng lượng","rừng","biển","sinh thái",
+            "tái chế","chất thải","biến đổi khí hậu","đa dạng sinh học","tài nguyên"],
+    "ent": ["thể thao","bóng đá","game","esports","giải trí","phim","ca sĩ",
+            "vận động viên","giải đấu","huy chương","sân khấu","nghệ sĩ"],
 }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _detect_heading_size(pdf_path: str) -> float:
+    """
+    Tìm font size của section heading dựa trên tần suất:
+    1. body_size = size xuất hiện nhiều nhất
+    2. Trong các size >= body * HEADING_RATIO, lấy cái xuất hiện nhiều nhất
+       → là section heading (lặp lại nhiều lần), không phải title (1-2 lần)
+    Cách này bền với mọi mức zoom/print vì dùng tỉ lệ thay vì threshold cứng.
+    """
     doc = fitz.open(pdf_path)
-    size_counts: Counter = Counter()
+    sizes: list[float] = []
     for page in doc:
         for b in page.get_text("dict")["blocks"]:
             if b["type"] != 0:
@@ -63,19 +103,16 @@ def _detect_heading_size(pdf_path: str) -> float:
                     t = span["text"].strip()
                     if not t or ord(t[0]) > 0xE000:
                         continue
-                    size_counts[round(span["size"], 1)] += 1
+                    sizes.append(round(span["size"], 1))
     doc.close()
-    if not size_counts:
-        return HEADING_SIZE_FALLBACK
-    body_size = size_counts.most_common(1)[0][0]
-    candidates = sorted(
-        [s for s, cnt in size_counts.items() if s > body_size and cnt >= 2],
-        reverse=True,
-    )
-    if candidates:
-        return candidates[0]
-    candidates = sorted([s for s in size_counts if s > body_size], reverse=True)
-    return candidates[0] if candidates else HEADING_SIZE_FALLBACK
+    if not sizes:
+        return 10.0
+    body_size = Counter(sizes).most_common(1)[0][0]
+    threshold = body_size * HEADING_RATIO
+    large_sizes = [s for s in sizes if s >= threshold]
+    if not large_sizes:
+        return threshold
+    return Counter(large_sizes).most_common(1)[0][0]
 
 
 def _extract_article_title(pdf_path: str) -> str:
@@ -93,14 +130,42 @@ def _extract_article_title(pdf_path: str) -> str:
     return "Untitled"
 
 
+def _detect_citation_format(pdf_path: str) -> str:
+    """
+    Đọc raw text toàn PDF, detect format citation đang dùng.
+    Trả về 'med' nếu có [src_xxx_NNN], 'law' nếu có [N], 'none' nếu không có gì.
+    """
+    doc = fitz.open(pdf_path)
+    text = "".join(page.get_text() for page in doc)
+    doc.close()
+    if _RE_CIT_MED_GROUP.search(text):
+        return "med"
+    if _RE_CIT_LAW.search(text):
+        return "law"
+    return "none"
+
+
 def _extract_sections(pdf_path: str) -> list[dict]:
+    cit_format = _detect_citation_format(pdf_path)
     heading_size = _detect_heading_size(pdf_path)
 
     def is_heading(span):
-        return abs(span["size"] - heading_size) < 0.5
+        return abs(span["size"] - heading_size) < heading_size * 0.08
 
     def is_footer(text):
         return bool(re.match(r"^Vivipedia\s", text))
+
+    def _buffer_closed(buf: str) -> bool:
+        """
+        Paragraph kết thúc khi buffer kết thúc bằng ] và không còn [ nào chưa đóng.
+        Dùng chung cho cả law và med — đơn giản đếm [ và ] toàn buffer.
+        """
+        stripped = buf.strip()
+        if not stripped.endswith("]"):
+            return False
+        return stripped.count("[") == stripped.count("]")
+
+    skip = SKIP_SECTIONS | (SKIP_SECTIONS_MED if cit_format == "med" else set())
 
     doc = fitz.open(pdf_path)
     raw_blocks = []
@@ -122,10 +187,9 @@ def _extract_sections(pdf_path: str) -> list[dict]:
                 raw_blocks.append({"text": block_text, "is_heading": block_is_heading})
     doc.close()
 
-    # Bắt đầu sau "Tóm tắt nhanh"
     start_idx = 0
     for i, b in enumerate(raw_blocks):
-        if b["is_heading"] and b["text"].strip() in SKIP_SECTIONS:
+        if b["is_heading"] and b["text"].strip() in skip:
             start_idx = i + 1
             break
 
@@ -135,16 +199,32 @@ def _extract_sections(pdf_path: str) -> list[dict]:
     def flush():
         nonlocal para_buffer
         raw = para_buffer.strip()
-        if raw:
-            citations = [int(x) for x in re.findall(r"\[(\d+)\]", raw)]
-            clean = re.sub(r"(\s*\[\d+\])+\s*$", "", raw).strip()
-            if clean:
-                cur_paras.append({"text": clean, "citations": citations})
+        if not raw:
+            para_buffer = ""
+            return
+        if cit_format == "med":
+            # Extract tất cả số từ mọi nhóm [...], cộng +1 (0-based → 1-based)
+            citations = [int(n) + 1 for n in _RE_CIT_MED_NUM.findall(raw)]
+            # Strip toàn bộ nhóm [src_...] kể cả ở giữa đoạn
+            clean = _RE_CIT_MED_STRIP.sub("", raw).strip()
+            clean = re.sub(r"\s{2,}", " ", clean)
+        else:
+            citations = [int(m) for m in _RE_CIT_LAW.findall(raw)]
+            # Law: strip citation ở cuối đoạn (dạng [1][2] hoặc [1,2])
+            clean = re.sub(r"(\s*\[\d+(?:,\s*\d+)*\])+\s*$", "", raw).strip()
+        if clean:
+            cur_paras.append({"text": clean, "citations": citations})
         para_buffer = ""
 
     for b in raw_blocks[start_idx:]:
         if is_footer(b["text"]):
+            flush()
             break
+        # Skip disclaimer heading ở bất kỳ vị trí nào trong bài
+        if b["is_heading"] and b["text"].strip() in skip:
+            flush()
+            # Bỏ qua luôn các block body tiếp theo cho đến heading kế
+            continue
         if b["is_heading"]:
             flush()
             if cur_heading is not None:
@@ -153,21 +233,31 @@ def _extract_sections(pdf_path: str) -> list[dict]:
             cur_paras   = []
             para_buffer = ""
         else:
-            para_buffer += " " + b["text"]
-            if re.search(r"\[\d+\]\s*$", b["text"]):
+            # Gom block vào buffer — dùng chung cho cả law và med
+            para_buffer = (para_buffer + " " + b["text"]).strip()
+            if _buffer_closed(para_buffer):
                 flush()
 
     flush()
     if cur_heading is not None and cur_paras:
         sections.append({"heading": cur_heading, "paragraphs": cur_paras})
 
+    # Chỉ giữ paragraph có citation
+    for sec in sections:
+        sec["paragraphs"] = [p for p in sec["paragraphs"] if p.get("citations")]
+    sections = [s for s in sections if s["paragraphs"]]
+
     return sections
 
 
 def _detect_domain(title: str, sections: list[dict]) -> str:
+    # Dùng title + heading + 2 paragraph đầu mỗi section để có đủ signal
     text = title.lower()
     for sec in sections[:5]:
         text += " " + sec["heading"].lower()
+        for para in sec.get("paragraphs", [])[:2]:
+            t = para["text"] if isinstance(para, dict) else para
+            text += " " + t.lower()
     scores = {dk: 0 for dk in _DOMAIN_KEYWORDS}
     for dk, keywords in _DOMAIN_KEYWORDS.items():
         for kw in keywords:

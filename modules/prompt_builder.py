@@ -21,6 +21,15 @@ def build_system_prompt() -> str:
     return load_rules()
 
 
+_DOMAIN_EXTRA = {
+    "med": """Lưu ý domain Y tế:
+- Mỗi claim phải có thêm dòng RISK=CRITICAL|STANDARD|GENERAL trong notes (6 dòng: RISK= SF= SC_original= SC_final= HR= SQ= TXT=)
+- Claim CRITICAL (tên thuốc/liều, vaccine, thời gian vàng, chỉ định nhập viện) → HR tối đa 0.74 nếu chỉ verify qua nguồn thứ cấp
+- fact_check_status có thêm giá trị OUTDATED khi thông tin đúng nhưng đã cũ
+- Nguồn ưu tiên: moh.gov.vn > bệnh viện công (Bạch Mai, Chợ Rẫy) > Vinmec/Tâm Anh > báo y tế""",
+}
+
+
 def build_article_prompt(article: dict, ref: dict,
                           domain_key: str = "", subdomain: str = "") -> str:
     """
@@ -46,12 +55,12 @@ def build_article_prompt(article: dict, ref: dict,
                     if 1 <= c <= len(all_urls):
                         cited_indices.add(c - 1)  # 0-based
 
-    # Nếu có citation → chỉ gửi URL được cite (tối đa 8)
-    # Nếu không có citation → gửi tối đa 8 URL đầu
+    # Lấy tất cả URL được cite — không cap cứng
+    # Nếu không có citation → gửi tối đa 15 URL đầu
     if cited_indices:
-        urls = [all_urls[i] for i in sorted(cited_indices)][:8]
+        urls = [all_urls[i] for i in sorted(cited_indices)]
     else:
-        urls = all_urls[:8]
+        urls = all_urls[:15]
 
     # ── Block domain gợi ý ───────────────────────────────────────────────────
     domain_hint = (
@@ -102,6 +111,9 @@ Lưu ý:
         url_section = """URL NGUỒN: (không có)
 Đặt fact_check_source_url = "" and fact_check_status = "KHONG TIM THAY" cho các claim không verify được."""
 
+    domain_extra = _DOMAIN_EXTRA.get(d_key, "")
+    domain_extra_block = f"\n---\n{domain_extra}" if domain_extra else ""
+
     return f"""TIÊU ĐỀ BÀI: {title}
 
 {domain_hint}
@@ -111,7 +123,7 @@ DANH SÁCH CLAIM ĐÃ TRÍCH XUẤT ({total_claims} claim — dùng đúng danh 
 {claims_block}
 
 ---
-{url_section}
+{url_section}{domain_extra_block}
 
 ---
 NHIỆM VỤ: Dựa trên nội dung đã đọc từ các URL, trả về JSON theo schema — {total_claims} claim, đúng thứ tự.
