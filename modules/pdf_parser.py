@@ -14,6 +14,8 @@ import fitz  # PyMuPDF
 HEADING_RATIO = 1.3       # heading phải lớn hơn body ít nhất bao nhiêu lần
 SKIP_SECTIONS = {"Tóm tắt nhanh", "Tóm tắt"}
 SKIP_SECTIONS_MED = {"Lưu ý y tế", "Lưu ý", "Disclaimer"}  # disclaimer đầu/cuối bài y tế
+CONTENT_MARKERS  = ["Nội dung bài viết"]        # inline start marker (CMS export)
+END_MARKERS      = {"Nguồn tham khảo", "Tài liệu tham khảo", "SEO"}
 
 # Regex citation theo từng format
 _RE_CIT_LAW = re.compile(r"\[(\d+)\]")

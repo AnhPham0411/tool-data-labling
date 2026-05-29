@@ -9,16 +9,23 @@ Prompt ngắn gọn (~2000-3000 ký tự):
 """
 import os
 
-RULE_PATH = os.path.join(os.path.dirname(__file__), "..", "rule.md")
+RULE_MAP = {
+    "law": "rule-luat.md",
+    "med": "rule-yte.md",
+    "trv": "rule-dulich.md",
+}
+DEFAULT_RULE = "rule-xin.md"
 
 
-def load_rules() -> str:
-    with open(RULE_PATH, encoding="utf-8") as f:
+def load_rules(domain_key: str = "") -> str:
+    filename = RULE_MAP.get(domain_key, DEFAULT_RULE)
+    path = os.path.join(os.path.dirname(__file__), "..", filename)
+    with open(path, encoding="utf-8") as f:
         return f.read()
 
 
-def build_system_prompt() -> str:
-    return load_rules()
+def build_system_prompt(domain_key: str = "") -> str:
+    return load_rules(domain_key)
 
 
 _DOMAIN_EXTRA = {

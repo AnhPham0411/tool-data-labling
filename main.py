@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from modules.pdf_parser      import parse_article
 from modules.ref_parser      import parse_ref
-from modules.prompt_builder  import build_system_prompt, build_article_prompt
+from modules.prompt_builder  import build_system_prompt, build_article_prompt, RULE_MAP, DEFAULT_RULE
 from modules.claude_automation import run_annotation_with_retry
 from modules.response_parser import extract_json, validate_schema, normalize_data
 from modules.excel_writer    import append_rows, OUTPUT_PATH
@@ -525,6 +525,21 @@ class App:
         self._domain_cb.pack(side="left", padx=6)
         tk.Label(r1, text="gợi ý — Claude sẽ xác nhận",
                  font=("Segoe UI", 8), bg=CARD, fg=FG2).pack(side="left", padx=4)
+        self._domain_cb.bind("<<ComboboxSelected>>",
+                              lambda *_: self._update_rule_indicator())
+
+        tk.Frame(info, bg=BORDER, height=1).pack(fill="x", padx=14)
+
+        # Rule indicator
+        r1b = tk.Frame(info, bg=CARD, pady=5)
+        r1b.pack(fill="x", padx=14)
+        tk.Label(r1b, text="Rule", font=FONT_LABEL,
+                 bg=CARD, fg=FG2, width=12, anchor="w").pack(side="left")
+        self._rule_var = tk.StringVar(value="rule-luat.md")
+        self._rule_lbl = tk.Label(r1b, textvariable=self._rule_var,
+                                   font=("Segoe UI", 9, "bold"),
+                                   bg=CARD, fg=ACCENT)
+        self._rule_lbl.pack(side="left", padx=6)
 
         tk.Frame(info, bg=BORDER, height=1).pack(fill="x", padx=14)
 
@@ -587,6 +602,17 @@ class App:
         self._strip_lbl = tk.Label(strip, text="Sẵn sàng",
                                     font=("Segoe UI", 8), bg=CARD, fg=FG2)
         self._strip_lbl.pack(side="left", padx=14)
+
+    def _update_rule_indicator(self):
+        dk = self._domain_key()
+        rule_file = RULE_MAP.get(dk, DEFAULT_RULE)
+        self._rule_var.set(rule_file)
+        color_map = {
+            "rule-luat.md":   ACCENT,
+            "rule-yte.md":    SUCCESS,
+            "rule-dulich.md": WARN,
+        }
+        self._rule_lbl.config(fg=color_map.get(rule_file, FG2))
 
     # ── Section header ────────────────────────────────────────────────────────
 
@@ -655,6 +681,7 @@ class App:
                             self._domain_cb.current(i)
                             self._domain_var.set(f"{k} — {v}")
                             break
+                self._update_rule_indicator()
 
                 self._dz_art.set_state(DropZone.STATE_OK)
                 self._dz_art._path = path
@@ -840,9 +867,11 @@ class App:
             # ── STAGE 3: Claude ───────────────────────────────────────────
             step(0.35, "\n[3/4] Gửi Claude Web...")
             try:
-                sys_p = build_system_prompt()
+                sys_p = build_system_prompt(detected)
                 art_p = build_article_prompt(art, ref, detected)
                 fetch_urls = ref.get("urls", [])[:8]  # tối đa 8 URL gửi riêng để fetch
+                rule_file  = RULE_MAP.get(detected, DEFAULT_RULE)
+                self._log(f"  Rule     : {rule_file}")
                 self._log(f"  System   : {len(sys_p)} ký tự")
                 self._log(f"  Article  : {len(art_p)} ký tự")
                 self._log(f"  URLs fetch: {len(fetch_urls)}")
