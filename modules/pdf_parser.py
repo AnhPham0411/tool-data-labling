@@ -157,12 +157,20 @@ def _extract_sections(pdf_path: str) -> list[dict]:
     def is_footer(text):
         return bool(re.match(r"^Vivipedia\s", text))
 
+    # Detect block là đuôi citation bị wrap sang dòng mới
+    # vd: "src_vinmec_com_001]." hoặc "src_x_000, src_y_001]."
+    _RE_TAIL_BLOCK = re.compile(r"^src_[a-z0-9_]+_\d+[\],\s]*\]\.?\s*$")
+
+    def _is_citation_tail(block_text: str) -> bool:
+        """Block chỉ chứa phần đuôi citation bị wrap — không phải câu mới."""
+        t = block_text.strip()
+        return bool(_RE_TAIL_BLOCK.match(t))
+
     def _buffer_closed(buf: str) -> bool:
         """
-        Paragraph kết thúc khi buffer kết thúc bằng ] và không còn [ nào chưa đóng.
-        Dùng chung cho cả law và med — đơn giản đếm [ và ] toàn buffer.
+        Paragraph kết thúc khi buffer kết thúc bằng ] hoặc ]. và [ == ].
         """
-        stripped = buf.strip()
+        stripped = buf.strip().rstrip(".")  # bỏ dấu chấm trailing trước khi check
         if not stripped.endswith("]"):
             return False
         return stripped.count("[") == stripped.count("]")
@@ -235,7 +243,6 @@ def _extract_sections(pdf_path: str) -> list[dict]:
             cur_paras   = []
             para_buffer = ""
         else:
-            # Gom block vào buffer — dùng chung cho cả law và med
             para_buffer = (para_buffer + " " + b["text"]).strip()
             if _buffer_closed(para_buffer):
                 flush()
