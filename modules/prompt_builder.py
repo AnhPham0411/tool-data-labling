@@ -1,11 +1,13 @@
 """
 prompt_builder.py — Build prompt gửi Claude.
 
-Prompt ngắn gọn (~2000-3000 ký tự):
-- Tiêu đề + domain gợi ý (script detect, Claude xác nhận/sửa)
-- Danh sách claim đã trích xuất (script làm, Claude không cần extract lại)
-- Danh sách URL đã check status
-- Yêu cầu JSON output
+Per-claim mode (mặc định):
+  build_article_header_prompt() — gửi 1 lần: tiêu đề + domain + tổng claim
+  build_claim_prompt()          — gửi N lần: 1 claim + URL của claim đó
+  build_article_footer_prompt() — gửi 1 lần cuối: yêu cầu article-level JSON
+
+Legacy (giữ lại, không dùng nữa):
+  build_article_prompt()        — toàn bộ bài 1 lần
 """
 import os
 
@@ -37,6 +39,21 @@ _DOMAIN_EXTRA = {
 }
 
 
+def get_cited_urls(article: dict, ref: dict) -> list[str]:
+    """Trả về danh sách URL thực sự được cite trong bài, theo thứ tự index."""
+    all_urls = ref.get("urls", [])
+    cited_indices = set()
+    for sec in article.get("sections", []):
+        for para in sec.get("paragraphs", []):
+            if isinstance(para, dict):
+                for c in para.get("citations", []):
+                    if 1 <= c <= len(all_urls):
+                        cited_indices.add(c - 1)
+    if cited_indices:
+        return [all_urls[i] for i in sorted(cited_indices)]
+    return all_urls[:15]
+
+
 def build_article_prompt(article: dict, ref: dict,
                           domain_key: str = "", subdomain: str = "") -> str:
     """
@@ -52,22 +69,7 @@ def build_article_prompt(article: dict, ref: dict,
     d_key       = article.get("domain_key") or domain_key or "?"
     d_name      = article.get("domain_name") or d_key
     all_urls    = ref.get("urls", [])
-
-    # Lấy citation numbers từ tất cả paragraph để lọc URL liên quan
-    cited_indices = set()
-    for sec in sections:
-        for para in sec.get("paragraphs", []):
-            if isinstance(para, dict):
-                for c in para.get("citations", []):
-                    if 1 <= c <= len(all_urls):
-                        cited_indices.add(c - 1)  # 0-based
-
-    # Lấy tất cả URL được cite — không cap cứng
-    # Nếu không có citation → gửi tối đa 15 URL đầu
-    if cited_indices:
-        urls = [all_urls[i] for i in sorted(cited_indices)]
-    else:
-        urls = all_urls[:15]
+    urls        = get_cited_urls(article, ref)
 
     # ── Block domain gợi ý ───────────────────────────────────────────────────
     domain_hint = (
@@ -86,8 +88,7 @@ def build_article_prompt(article: dict, ref: dict,
             text = para["text"] if isinstance(para, dict) else para
             cits = para.get("citations", []) if isinstance(para, dict) else []
             cite_str = f"  [cite: {', '.join(str(c) for c in cits)}]" if cits else ""
-            # Giới hạn mỗi claim 400 ký tự để prompt không phình to
-            snippet = text[:400] + ("..." if len(text) > 400 else "")
+            snippet = text
             claim_lines.append(f"[Claim {claim_idx}]{cite_str} {snippet}")
 
     claims_block = "\n".join(claim_lines) if claim_lines else "(không trích xuất được claim)"
@@ -135,3 +136,130 @@ DANH SÁCH CLAIM ĐÃ TRÍCH XUẤT ({total_claims} claim — dùng đúng danh 
 ---
 NHIỆM VỤ: Dựa trên nội dung đã đọc từ các URL, trả về JSON theo schema — {total_claims} claim, đúng thứ tự.
 Không markdown. Không giải thích. Chỉ JSON thuần."""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-claim mode — 3 hàm dùng trong luồng mới
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_article_header_prompt(article: dict, ref: dict,
+                                 domain_key: str = "") -> str:
+    """
+    Gửi 1 lần sau system prompt — giới thiệu bài, domain, tổng số claim.
+    Claude ack rồi mới nhận từng claim.
+    """
+    title    = article.get("title", "")
+    d_key    = article.get("domain_key") or domain_key or "?"
+    d_name   = article.get("domain_name") or d_key
+    sections = article.get("sections", [])
+    total    = sum(len(s.get("paragraphs", [])) for s in sections)
+    all_urls = ref.get("urls", [])
+    n_urls   = len(all_urls)
+
+    return f"""BÀI VIẾT CẦN ANNOTATION:
+Tiêu đề : {title}
+Domain  : [{d_key}] {d_name}
+Tổng    : {total} claim, {n_urls} URL nguồn trong Ref PDF
+
+Tôi sẽ gửi từng claim một. Với mỗi claim bạn phải:
+1. Phân loại risk (CRITICAL / STANDARD / GENERAL)
+2. Mở tất cả URL gắn kèm claim đó — đọc nội dung thực tế
+3. Web search nếu CRITICAL (≥2 lần) hoặc STANDARD (≥1 lần)
+4. Fact-check → chọn 1 trong 8 status
+5. Chấm SF, SC, HR, SQ theo đúng rubric
+6. Ghi notes đủ 6 dòng: RISK= SF= SC= HR= SQ= TXT=
+7. Trả về JSON **chỉ 1 claim** theo schema (object, không phải array)
+
+Schema JSON 1 claim:
+{{
+  "claim": "nội dung claim nguyên văn",
+  "risk_level": "CRITICAL|STANDARD|GENERAL",
+  "fact_check_status": "XAC NHAN|LECH|MAU THUAN|OUTDATED|KHONG TIM THAY|KHONG TIM THAY + ESCALATE|BO QUA|ERROR",
+  "fact_check_source_url": "https://... (URL bạn dùng để verify)",
+  "source_fidelity": 0.00,
+  "source_coverage": 0.00,
+  "hallucination_rate": 0.00,
+  "source_quality": 0.00,
+  "notes": "RISK=...: ...\\nSF=...: ...\\nSC=...: ...\\nHR=...: ...\\nSQ=...: ...\\nTXT=...: ..."
+}}
+
+Không markdown. Không giải thích. Chỉ JSON thuần mỗi lần.
+Xác nhận bạn đã hiểu quy trình."""
+
+
+def build_claim_prompt(claim_idx: int, total_claims: int,
+                       para: dict, all_urls: list[str],
+                       url_status: dict) -> str:
+    """
+    Gửi 1 claim — bao gồm text đầy đủ + tất cả URL của claim đó.
+
+    claim_idx : 1-based index
+    para      : {"text": str, "citations": [int, ...]}  (citations là 1-based)
+    all_urls  : toàn bộ URL từ ref_parser
+    url_status: {url: "OK (200)" | "HTTP_404" | ...}
+    """
+    text = para.get("text", "")
+    cits = para.get("citations", [])  # 1-based indices vào all_urls
+
+    # Lấy URL thực của claim này
+    claim_urls = []
+    for c in cits:
+        if 1 <= c <= len(all_urls):
+            url = all_urls[c - 1]
+            status = url_status.get(url, "")
+            if status and not status.startswith("OK"):
+                claim_urls.append(f"{url}  ← [{status}]")
+            else:
+                claim_urls.append(url)
+
+    if claim_urls:
+        url_block = "URL nguồn của claim này (mở và đọc trước khi fact-check):\n" + "\n".join(claim_urls)
+    else:
+        url_block = "URL nguồn: (không có — đặt fact_check_status = KHONG TIM THAY nếu không tìm được nguồn)"
+
+    return f"""[Claim {claim_idx}/{total_claims}]
+{text}
+
+{url_block}
+
+Thực hiện đầy đủ 7 bước, trả về JSON 1 claim. Không markdown. Chỉ JSON."""
+
+
+def build_article_footer_prompt(article: dict, claims_summary: list[dict]) -> str:
+    """
+    Gửi sau khi tất cả claim xong — yêu cầu Claude trả article-level JSON
+    (domain, sub_domain, rel, comp, single_source_bias).
+
+    claims_summary: list status của từng claim để Claude có context tổng thể.
+    """
+    title  = article.get("title", "")
+    d_key  = article.get("domain_key", "?")
+    d_name = article.get("domain_name", d_key)
+
+    status_lines = "\n".join(
+        f"  Claim {i+1}: {c.get('fact_check_status','?')} | risk={c.get('risk_level','?')}"
+        for i, c in enumerate(claims_summary)
+    )
+
+    return f"""Tất cả {len(claims_summary)} claim đã annotation xong.
+
+Tóm tắt kết quả:
+{status_lines}
+
+Bây giờ trả về JSON cấp bài (article-level). Không có claims — chỉ phần article:
+{{
+  "title": "{title}",
+  "domain_key": "{d_key}",
+  "domain": "{d_name}",
+  "sub_domain": "Tên sub-domain",
+  "sub_domain_id": "med_01",
+  "single_source_bias": false,
+  "rel": 0.00,
+  "rel_band": "Good",
+  "rel_reason": "2-3 câu lý do",
+  "comp": 0.00,
+  "comp_band": "Good",
+  "comp_reason": "2-3 câu lý do"
+}}
+
+Không markdown. Chỉ JSON thuần."""

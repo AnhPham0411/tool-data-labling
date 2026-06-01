@@ -8,3 +8,7 @@ debug_*.txt
 outputs/
 data/
 .env
+build/
+dist/
+*.spec
+result_med.txt

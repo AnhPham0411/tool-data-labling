@@ -1,156 +1,179 @@
-# Quy trình chạy Tool Auto Annotation RAG
+# Quy trình kỹ thuật — Vivipedia Annotation Tool
 
-Tài liệu mô tả chính xác từng bước tool thực hiện để dễ đối chiếu khi bị lỗi.
+Tài liệu mô tả chính xác từng bước pipeline thực hiện. Dùng để đối chiếu khi debug lỗi.
 
 ---
 
-## 1. Chuẩn bị (Trước khi chạy `main.py`)
+## 1. Chuẩn bị
 
 Chạy `python login_claude.py` để mở Chrome với remote debugging (port 9222).  
-Đăng nhập vào Claude.ai một lần trong cửa sổ này. **Không đóng Chrome** trong suốt phiên làm việc.
+Đăng nhập vào Claude.ai một lần. **Không đóng Chrome** trong suốt phiên làm việc.
 
 ---
 
-## 2. Quy trình xử lý tự động (Sau khi bấm RUN trên giao diện)
+## 2. Pipeline xử lý (sau khi bấm RUN)
 
-### Bước 1 — Validate đầu vào (trước khi chạy pipeline)
+### Bước 1 — Validate đầu vào
 
-Tool kiểm tra nhiều tầng trước khi bắt đầu xử lý:
+Tool kiểm tra theo thứ tự trước khi bắt đầu:
 
-1. **Annotator ID** — bắt buộc phải điền, khuyến nghị định dạng `ANT-xx`
-2. **File bài viết** — kiểm tra tồn tại, đúng định dạng PDF, không bị mã hóa, không rỗng/hỏng
-3. **File Ref PDF** — tùy chọn, nếu không có tool hỏi có muốn tiếp tục không
-4. **Không chọn cùng 1 file** cho cả 2 ô drop zone
-5. **Chrome CDP** — ping `localhost:9222` để kiểm tra Chrome đang sẵn sàng
+1. **Annotator ID** — bắt buộc, khuyến nghị `ANT-xx`
+2. **File bài viết** — tồn tại, đúng PDF magic bytes, không mã hóa, không rỗng
+3. **File Ref PDF** — tùy chọn, nếu thiếu tool hỏi xác nhận
+4. **Không chọn cùng 1 file** cho cả 2 drop zone
+5. **Chrome CDP** — ping `localhost:9222` trước khi chạy
 
-Khi kéo thả file bài viết, tool đọc trước để hiện tiêu đề và số claims ngay lập tức (chạy trên thread riêng, không block UI).
+Khi kéo thả file bài viết, tool đọc trước trên thread riêng để hiện tiêu đề + số claims ngay (không block UI).
 
 ---
 
 ### Bước 2 — Parse PDF bài viết (`pdf_parser.py`)
 
-**Detect heading size tự động:**
-- Duyệt toàn bộ span trong PDF, thu thập tần suất font size
-- Font size xuất hiện nhiều nhất = body size
-- Heading size = size lớn hơn body size gần nhất (không hardcode ngưỡng)
+**Detect heading size tự động (không hardcode):**
+- Duyệt toàn bộ span → thu thập tần suất font size
+- `body_size` = font size xuất hiện nhiều nhất
+- `heading_size` = size phổ biến nhất trong các size ≥ body × 1.3
+
+**Detect citation format:**
+- Quét raw text toàn PDF
+- `[src_vinmec_com_000]` → format **med** (0-based index)
+- `[1]`, `[2,3]` → format **law** (1-based số thứ tự)
+- Không tìm thấy → `none`
 
 **Trích xuất section:**
-- Bỏ qua toàn bộ nội dung trước phần "Tóm tắt nhanh" (phần tóm tắt, không phải claim)
-- Nhóm paragraph theo heading → mỗi heading là 1 section
-- Mỗi paragraph ghi nhận citation number `[1]`, `[2]`... nếu có
-- Dừng khi gặp footer bắt đầu bằng "Vivipedia"
+- Bỏ qua nội dung trước heading "Tóm tắt nhanh" / "Tóm tắt"
+- Nhóm paragraph theo heading
+- Gom block vào buffer, flush khi bracket `[...]` đóng đủ
+- Dừng khi gặp footer "Vivipedia" hoặc heading kết thúc ("Nguồn tham khảo", "SEO")
 
-**Detect domain tự động:**
-- Đếm keyword điểm trong tiêu đề + 5 heading đầu
-- Gợi ý domain cho user trong UI (user có thể override)
+**Flush paragraph:**
+- **Med**: extract số cuối mỗi `src_xxx_NNN` (+1 → 1-based), strip `[src_...]` khỏi text
+- **Law**: extract số nguyên, strip citation ở cuối đoạn
 
-**Kết quả trả về:** `{title, sections, claims_count, domain_key, domain_name, headings}`
+**Lọc claim:** Chỉ giữ paragraph có ít nhất 1 citation — đây là claim.
+
+**Detect domain:** Keyword scoring từ title + 5 heading đầu + 2 paragraph đầu mỗi section → 13 domain.
+
+**Kết quả:** `{title, sections, claims_count, domain_key, domain_name, headings, content}`
 
 ---
 
 ### Bước 3 — Parse Ref PDF (`ref_parser.py`)
 
-- Chỉ dùng `page.get_links()` của PyMuPDF — lấy hyperlink annotation thật
-- Loại bỏ URL thuộc các domain nội bộ/mạng xã hội: `vivipedia.vn`, `facebook.com`, `youtube.com`, v.v.
-- Dedup theo URL chính xác, giữ nguyên thứ tự xuất hiện
-- Strip dấu câu trailing (`.`, `,`, `;`, `:`)
+- Dùng `page.get_links()` của PyMuPDF — lấy hyperlink annotation thật
+- Bỏ domain nội bộ/mạng xã hội: `vivipedia.vn`, `facebook.com`, `youtube.com`, v.v.
+- Dedup, giữ thứ tự xuất hiện, strip dấu câu trailing
+- Check HTTP status song song (6 workers, timeout 3s/URL)
 
-**Kết quả trả về:** `{urls: [...], url_count: int}`
+**Kết quả:** `{urls, url_count, url_status: {url: "OK (200)" | "HTTP_4xx" | "KHÔNG TRUY CẬP"}}`
 
-> Không dùng regex hay pdfplumber để tránh bắt nhầm URL inline trong text bài viết.
+> Không dùng regex hay pdfplumber — tránh bắt nhầm URL inline trong text.
 
 ---
 
 ### Bước 4 — Build Prompt (`prompt_builder.py`)
 
-Tạo 2 prompt:
+**Per-claim mode** — 3 loại prompt:
 
-**System prompt** — toàn bộ nội dung `rule.md` (rubric SF/SC/HR/SQ, JSON schema, hướng dẫn fact-check).
+**System prompt** — toàn bộ `rule-{domain}.md` (rubric, schema, hướng dẫn fact-check).
 
-**Article prompt** (~2000-3000 ký tự) gồm:
-- Tiêu đề bài + domain gợi ý (Claude xác nhận hoặc sửa)
-- Danh sách claim đã trích xuất (Claude không cần extract lại)
-- Danh sách URL nguồn — ưu tiên URL được cite trong bài, tối đa 8 URL
-- Yêu cầu trả về JSON thuần, không markdown, không giải thích
+**Header prompt** (gửi 1 lần sau system):
+- Tiêu đề bài + domain + tổng số claim
+- Schema JSON 1 claim + quy trình 7 bước
+- Yêu cầu Claude ack trước khi nhận claim
 
-URL được liệt kê standalone trên mỗi dòng riêng để Claude.ai nhận diện và tự động fetch.
+**Claim prompt** (gửi N lần, 1 claim/lần):
+- `[Claim i/N]` + text đầy đủ (không cắt)
+- URL nguồn **chỉ của claim đó** (lọc từ citations, có đánh dấu URL lỗi)
+
+**Footer prompt** (gửi 1 lần cuối):
+- Summary tất cả claim đã xong (status + risk_level)
+- Yêu cầu trả article-level JSON: domain, sub_domain, rel, comp, single_source_bias
+
+**`get_cited_urls(article, ref)`** — lấy URL thực sự được cite (không lấy toàn bộ ref), fallback 15 URL đầu nếu không có citation.
 
 ---
 
 ### Bước 5 — Gửi Claude qua Chrome (`claude_automation.py`)
 
-**Kết nối:** Playwright CDP connect vào Chrome đang chạy ở `localhost:9222`.  
-Tìm tab `claude.ai` đang mở hoặc tạo tab mới, điều hướng đến `claude.ai/new` để có session sạch.
+**Kết nối:**
+- Playwright CDP connect vào Chrome ở `localhost:9222`
+- Tìm tab `claude.ai` đang mở hoặc tạo tab mới
+- Navigate đến `claude.ai/new` → `wait_for_selector('[contenteditable]')` thay vì sleep cứng
 
 **Gửi text qua clipboard:**
-- Đưa text vào clipboard Windows qua PowerShell với encoding UTF-8 BOM
-- Paste vào input box bằng `Ctrl+V` → Claude.ai nhận diện URL và trigger web fetch
-- Dùng clipboard thay vì `insert_text()` vì chỉ clipboard mới trigger URL detection của Claude UI
+- Ghi file tạm UTF-8 BOM → PowerShell đọc → `Set-Clipboard`
+- Paste `Ctrl+V` → Claude.ai nhận diện URL và trigger web fetch
+- Clipboard thay vì `insert_text()` vì chỉ clipboard mới trigger URL detection
 
-**Gửi System Prompt:** Paste → Send → chờ Claude xác nhận (~60s timeout)
+**Phát hiện Claude xong (event-driven):**
+- `page.wait_for_function()` với JS condition poll ~100ms
+- Condition: không còn Stop button **VÀ** element `[data-is-streaming]` mới xuất hiện (so với `prev_count`) với `data-is-streaming="false"` **VÀ** đủ text
+- `prev_count` đếm trước mỗi lần gửi để tránh lấy response cũ
+- Detect error toast → raise `ConnectionError` sớm, không chờ timeout
 
-**Gửi Article Prompt:** Paste → Send → chờ Claude xử lý + browse URL (~300s timeout)
-
-**Chờ phản hồi (polling thông minh):**
-- Poll mỗi 3s bằng JavaScript kiểm tra nút Stop/spinner còn hiện không
-- Nếu text không thay đổi 4 lần liên tiếp → coi như Claude đã xong
-- Hard timeout 300s — chụp `debug_screenshot.png` nếu timeout
-- Retry tối đa 3 lần nếu lỗi không phải lỗi setup
-
-**Lấy response:** JavaScript quét DOM theo thứ tự ưu tiên:
-1. Code block `language-json` cuối cùng
-2. `[data-message-author-role="assistant"]` cuối cùng
-3. Fallback `.prose` cuối cùng
-
----
-
-### Bước 6 — Parse JSON (`response_parser.py`)
-
-4 chiến lược parse theo thứ tự ưu tiên:
-1. Parse trực tiếp toàn bộ response
-2. Lấy từ code fence ` ```json ... ``` `
-3. Balanced brace scan — tìm `{` đầu tiên, đếm brace đến khi cân bằng
-4. Greedy regex fallback — lấy từ `{` đầu đến `}` cuối
-
-**Normalize sau parse:**
-- Chuẩn hóa `fact_check_status`: `XAC_NHAN` → `XAC NHAN`, v.v.
-- Ép kiểu float cho SF, SC, HR, SQ, rel, comp
-
-**Validate schema:** Kiểm tra tối thiểu có field `article` và `claims`.
+**Luồng per-claim trong 1 conversation:**
+```
+Gửi system_prompt → ack (timeout 60s)
+Gửi header_prompt → ack (timeout 60s)
+Lặp i = 1..N:
+    Gửi claim_prompt[i] → chờ JSON 1 claim (timeout 180s)
+    Nếu lỗi/rỗng → retry 2 lần → ghi placeholder, tiếp tục
+    Callback on_claim_done(i, raw) → parse + update progress bar
+Gọi footer_prompt_fn() để build footer (có context cc)
+Gửi footer_prompt → chờ article JSON (timeout 120s)
+```
 
 ---
 
-### Bước 7 — Merge và ghi Excel (`excel_writer.py`)
+### Bước 6 — Parse JSON per-claim (`response_parser.py`)
 
-**Merge dữ liệu:**  
-- Flatten paragraph từ tất cả section thành danh sách claim
-- Map 1-1 với claim list từ Claude (theo thứ tự)
-- Ghép thêm metadata: title, domain, subdomain, annotator ID, ngày
+**`extract_single_claim_json(raw)`** — parse 1 claim:
+- Dùng lại 4 strategy của `extract_json` (direct → fence → brace scan → regex)
+- Unwrap nếu Claude wrap trong `{"claims": [...]}` hoặc `{"claim_data": ...}`
+- Validate đủ 9 field bắt buộc
+
+**`normalize_claim(claim)`:**
+- `fact_check_status` → chuẩn hóa (underscore → space, typo variants)
+- SF/SC/HR/SQ → ép kiểu float
+
+**`make_error_claim(idx, para, reason)`:**
+- Placeholder khi claim fail sau retry
+- `fact_check_status = "ERROR"`, notes ghi `TOOL_ERROR: {reason}`
+- Pipeline tiếp tục, claim khác không bị ảnh hưởng
+
+**`extract_article_json(raw)`:**
+- Parse footer response → article-level fields
+- Unwrap `{"article": {...}}` nếu cần
+- Validate field: domain_key, sub_domain, rel, comp
+
+**Validate claim (cảnh báo, không dừng):**
+- `fact_check_status` phải là 1 trong 8 giá trị hợp lệ
+- SF, SC, HR, SQ ∈ [0.0, 1.0]
+- `fact_check_source_url` bắt đầu bằng `http` nếu có
+
+---
+
+### Bước 7 — Ghi Excel (`excel_writer.py`)
+
+**Merge dữ liệu:**
+- Flatten paragraph từ tất cả section → danh sách claim theo thứ tự
+- Map 1-1 với `cc` (claim list từ Claude)
+- Ghép metadata: title, domain, subdomain, annotator ID, ngày
 
 **Cấu trúc Excel:**
 
 | Dòng | Nội dung | Màu |
 |------|----------|-----|
 | 1 | Title bar merge A1:O1 | Navy `FF1F3864` |
-| 2 | Nhãn nhóm cột (IDENTITY / FACT-CHECK / METRICS / ANNOTATION INFO) | Màu theo nhóm |
-| 3 | Tên từng cột | Màu theo nhóm |
+| 2 | Nhãn nhóm cột (IDENTITY / FACT-CHECK / METRICS / ANNOTATION INFO) | Theo nhóm |
+| 3 | Tên từng cột | Theo nhóm |
 | 4 | Dòng template hướng dẫn | Vàng nhạt |
-| 5+ | Dữ liệu | Trắng xanh nhạt |
+| 5+ | Dữ liệu claim | Trắng xanh nhạt |
 
-Freeze pane tại `C5` (cố định 2 cột đầu + 4 dòng header).
+Freeze pane tại `C5`. Dòng cần review (status ERROR hoặc metric bất thường) tô vàng cam.
 
-**Append mode:** Không tạo file mới mỗi lần — load workbook cũ và append từ dòng tiếp theo. Nếu file đang bị khóa (mở trong Excel) → lưu vào file backup với timestamp.
-
-Sau khi ghi xong, Windows Explorer tự mở đến file Excel.
-
----
-
-### Validate claim sau khi parse (cảnh báo, không dừng pipeline)
-
-- `fact_check_status` phải là 1 trong 6 giá trị hợp lệ
-- SF, SC, HR, SQ phải là số trong `[0.0, 1.0]`
-- `fact_check_source_url` phải bắt đầu bằng `http` nếu có
-- `notes` phải có format `SF=... SC=... HR=... SQ=... TXT=...`
+**Append mode:** Load workbook cũ → append từ dòng tiếp theo. Nếu file đang khóa (Excel đang mở) → lưu backup với timestamp.
 
 ---
 
@@ -158,10 +181,11 @@ Sau khi ghi xong, Windows Explorer tự mở đến file Excel.
 
 | Vấn đề | Nguyên nhân | Dấu hiệu | Cách xử lý |
 |--------|-------------|----------|------------|
-| 0 claims | PDF là file scan ảnh | Log: "Không trích xuất được claim" | Dùng PDF có text layer |
+| 0 claims | PDF scan ảnh, không có text layer | Log: "Không trích xuất được claim" | Dùng PDF có text layer |
 | Chrome không kết nối | Chưa chạy `login_claude.py` | Log: "port 9222" | Chạy lại `login_claude.py` |
-| Response rỗng | Timeout hoặc Claude bị lỗi UI | `debug_screenshot.png` | Xem ảnh, thử chạy lại |
-| JSON parse thất bại | Claude trả text thay vì JSON | Log preview 200 ký tự đầu | Tool retry 3 lần tự động |
-| PermissionError Excel | File Excel đang mở | Log: "file đang mở" | Đóng Excel, chạy lại |
-| Màu Excel trong suốt | Dùng 6-ký-tự hex | Cột không có màu | Dùng 8-ký-tự với prefix `FF` |
-| Số claim lệch | Claude detect thêm/bớt claim | Log: cảnh báo "lệch N" | Kiểm tra bài viết, chấp nhận nếu lệch < 3 |
+| DOM text len = 0 sau paste | Input box chưa ready | Log: paste thành công nhưng Claude không nhận | Thường tự xử lý qua `wait_for_selector` |
+| Claim placeholder ERROR | Claim timeout hoặc parse lỗi | Log: `⚠ Claim X: parse lỗi` | Các claim khác vẫn chạy, kiểm tra log |
+| Footer parse lỗi | Claude trả sai format | Log: `⚠ Footer parse lỗi` | article-level dùng fallback từ pdf_parser |
+| PermissionError Excel | File đang mở trong Excel | Log: "file đang mở" | Đóng Excel, chạy lại |
+| `fact_check_status` không hợp lệ | Claude typo hoặc dùng variant | Cảnh báo trong log | Thêm vào `_STATUS_NORMALIZE` trong response_parser.py |
+| `debug_screenshot.png` sinh ra | Timeout trong `_wait_response` | File xuất hiện ở root | Xem ảnh, kiểm tra Claude UI |

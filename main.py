@@ -14,9 +14,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from modules.pdf_parser      import parse_article
 from modules.ref_parser      import parse_ref
-from modules.prompt_builder  import build_system_prompt, build_article_prompt, RULE_MAP, DEFAULT_RULE
-from modules.claude_automation import run_annotation_with_retry
-from modules.response_parser import extract_json, validate_schema, normalize_data
+from modules.prompt_builder  import (build_system_prompt, build_article_prompt,
+                                      build_article_header_prompt, build_claim_prompt,
+                                      build_article_footer_prompt,
+                                      get_cited_urls, RULE_MAP, DEFAULT_RULE)
+from modules.claude_automation import run_annotation_per_claim
+from modules.response_parser import (extract_json, validate_schema, normalize_data,
+                                      extract_single_claim_json, normalize_claim,
+                                      make_error_claim, extract_article_json)
 from modules.excel_writer    import append_rows, OUTPUT_PATH
 
 # ─── Palette ──────────────────────────────────────────────────────────────────
@@ -864,21 +869,68 @@ class App:
             else:
                 self._log("  Không có Ref PDF → không có URL nguồn", "warn")
 
-            # ── STAGE 3: Claude ───────────────────────────────────────────
-            step(0.35, "\n[3/4] Gửi Claude Web...")
-            try:
-                sys_p = build_system_prompt(detected)
-                art_p = build_article_prompt(art, ref, detected)
-                fetch_urls = ref.get("urls", [])[:8]  # tối đa 8 URL gửi riêng để fetch
-                rule_file  = RULE_MAP.get(detected, DEFAULT_RULE)
-                self._log(f"  Rule     : {rule_file}")
-                self._log(f"  System   : {len(sys_p)} ký tự")
-                self._log(f"  Article  : {len(art_p)} ký tự")
-                self._log(f"  URLs fetch: {len(fetch_urls)}")
+            # ── STAGE 3: Claude per-claim ─────────────────────────────────
+            step(0.35, "\n[3/4] Gửi Claude Web (per-claim mode)...")
 
-                raw = run_annotation_with_retry(sys_p, art_p, urls=fetch_urls, log_fn=self._log)
+            # Build prompts
+            sys_p    = build_system_prompt(detected)
+            header_p = build_article_header_prompt(art, ref, detected)
+            all_urls = ref.get("urls", [])
+            url_status = ref.get("url_status", {})
+
+            # Flatten tất cả paragraphs theo thứ tự claim
+            all_paras = []
+            for sec in sections:
+                for para in sec.get("paragraphs", []):
+                    all_paras.append(para)
+
+            claim_ps = [
+                build_claim_prompt(i + 1, n_claims, para, all_urls, url_status)
+                for i, para in enumerate(all_paras)
+            ]
+
+            rule_file = RULE_MAP.get(detected, DEFAULT_RULE)
+            self._log(f"  Rule     : {rule_file}")
+            self._log(f"  System   : {len(sys_p)} ký tự")
+            self._log(f"  Header   : {len(header_p)} ký tự")
+            self._log(f"  Claims   : {n_claims} (mỗi claim 1 lần gửi)")
+
+            # Progress per-claim: 0.35 → 0.78
+            prog_start = 0.35
+            prog_range = 0.43
+
+            cc = []  # sẽ được fill qua callback
+
+            def on_claim_done(idx: int, raw: str):
+                # Parse + normalize ngay khi nhận, lỗi thì dùng placeholder
+                if raw.startswith("TOOL_ERROR:"):
+                    claim = make_error_claim(idx + 1, all_paras[idx], raw)
+                else:
+                    try:
+                        claim = extract_single_claim_json(raw)
+                        claim = normalize_claim(claim)
+                    except Exception as e:
+                        self._log(f"  ⚠ Claim {idx+1}: parse lỗi ({e}) — dùng placeholder", "warn")
+                        claim = make_error_claim(idx + 1, all_paras[idx], str(e))
+                cc.append(claim)
+                # Update progress bar
+                frac = prog_start + prog_range * (idx + 1) / n_claims
+                self._prog.set(frac)
+
+            try:
+                # Footer build sau khi có đủ cc — dùng lambda để defer
+                def get_footer():
+                    return build_article_footer_prompt(art, cc)
+
+                claim_raws, article_raw = run_annotation_per_claim(
+                    system_prompt=sys_p,
+                    header_prompt=header_p,
+                    claim_prompts=claim_ps,
+                    footer_prompt_fn=get_footer,
+                    log_fn=self._log,
+                    on_claim_done=on_claim_done,
+                )
             except RuntimeError as e:
-                # RuntimeError = lỗi setup (Chrome/CDP) — không retry
                 msg = str(e)
                 if "connect" in msg.lower() or "9222" in msg:
                     raise PipelineError(
@@ -888,76 +940,49 @@ class App:
                     )
                 elif "login" in msg.lower() or "auth" in msg.lower():
                     raise PipelineError(
-                        "Kết nối Claude",
-                        "Claude chưa đăng nhập.",
+                        "Kết nối Claude", "Claude chưa đăng nhập.",
                         "Mở Chrome, đăng nhập claude.ai, rồi chạy lại."
                     )
                 else:
                     raise PipelineError("Kết nối Claude", msg,
-                                         "Kiểm tra Chrome có đang mở claude.ai không.")
+                                        "Kiểm tra Chrome có đang mở claude.ai không.")
             except Exception as e:
-                raise PipelineError("Claude",
-                                     f"Lỗi khi gửi/nhận dữ liệu: {e}",
-                                     "Xem debug_screenshot.png để biết trạng thái trang.")
+                raise PipelineError("Claude", f"Lỗi per-claim: {e}",
+                                    "Xem debug_screenshot.png.")
 
-            if not raw or not raw.strip():
-                raise PipelineError(
-                    "Claude",
-                    "Claude trả về response rỗng.",
-                    "Timeout hoặc Claude không xử lý được. Xem debug_screenshot.png."
-                )
-            self._log(f"  Nhận     : {len(raw)} ký tự")
+            # Article-level từ footer — parse, fallback nếu lỗi
+            ca = {}
+            if article_raw and not article_raw.startswith("TOOL_ERROR:"):
+                try:
+                    ca = extract_article_json(article_raw)
+                except Exception as e:
+                    self._log(f"  ⚠ Footer parse lỗi: {e} — dùng fallback", "warn")
 
-            # ── STAGE 4: Parse JSON ───────────────────────────────────────
-            step(0.80, "\n[4/4] Parse JSON + ghi Excel...")
-            try:
-                data = extract_json(raw)
-            except ValueError as e:
-                # Hiện 200 ký tự đầu raw để debug
-                preview = raw[:200].replace("\n", " ")
-                raise PipelineError(
-                    "Parse JSON",
-                    f"Không parse được JSON từ Claude.\nPreview: {preview}",
-                    "Claude có thể trả về text thay vì JSON. Xem log đầy đủ bên trên."
-                )
-
-            try:
-                data = normalize_data(data)
-            except Exception as e:
-                raise PipelineError("Normalize", f"Lỗi normalize data: {e}")
-
-            if not validate_schema(data):
-                raise PipelineError(
-                    "JSON Schema",
-                    "JSON từ Claude thiếu field 'article' hoặc 'claims'.",
-                    "Claude có thể đã trả về JSON sai schema. Kiểm tra rule.md."
-                )
-
-            cc   = data.get("claims", [])
-            ca   = data.get("article", {})
-            dn   = ca.get("domain") or art.get("domain_name", detected)
+            # Fallback article fields từ pdf_parser nếu Claude không trả
+            dn   = ca.get("domain")   or art.get("domain_name", detected)
             sd   = ca.get("sub_domain", "")
             sdid = ca.get("sub_domain_id", "")
 
-            # Cảnh báo nếu số claim lệch nhiều
-            if abs(len(cc) - n_claims) > 3:
-                self._log(
-                    f"  ⚠ Claude trả {len(cc)} claims, script detect {n_claims} claims "
-                    f"(lệch {abs(len(cc)-n_claims)})", "warn"
-                )
+            # ── STAGE 4: Parse JSON + ghi Excel ──────────────────────────
+            step(0.80, "\n[4/4] Parse JSON + ghi Excel...")
+
             if len(cc) == 0:
                 raise PipelineError(
-                    "JSON Schema",
-                    "Claude trả về 0 claims trong JSON.",
-                    "Kiểm tra prompt — Claude có thể không xử lý được danh sách claim."
+                    "Per-claim",
+                    "Không nhận được kết quả claim nào từ Claude.",
+                    "Kiểm tra Chrome và kết nối mạng."
                 )
+
+            n_errors = sum(1 for c in cc if c.get("fact_check_status") == "ERROR"
+                           and "TOOL_ERROR" in c.get("notes", ""))
+            if n_errors:
+                self._log(f"  ⚠ {n_errors}/{len(cc)} claim lỗi tool (placeholder)", "warn")
 
             self._log(f"  Domain   : {dn}")
             self._log(f"  Sub      : {sd} [{sdid}]")
             self._log(f"  Claims   : {len(cc)}")
             self._log(f"  Rel={ca.get('rel','?')} | Comp={ca.get('comp','?')}")
 
-            # Validate từng claim
             _validate_claims(cc, self._log)
 
             # ── Ghi Excel ─────────────────────────────────────────────────
@@ -1009,7 +1034,8 @@ class App:
 
 # ─── Claim-level validation ───────────────────────────────────────────────────
 
-VALID_STATUSES = {"XAC NHAN", "LECH", "MAU THUAN", "OUTDATED", "KHONG TIM THAY", "BO QUA"}
+VALID_STATUSES = {"XAC NHAN", "LECH", "MAU THUAN", "OUTDATED", "KHONG TIM THAY",
+                  "KHONG TIM THAY + ESCALATE", "BO QUA", "ERROR"}
 
 def _validate_claims(claims: list, log_fn) -> None:
     """Cảnh báo các claim có dữ liệu bất thường — không raise, chỉ log."""

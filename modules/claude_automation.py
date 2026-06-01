@@ -23,7 +23,13 @@ _JS_GET_LAST_RESPONSE = """
         return jsonCodes[jsonCodes.length - 1].textContent;
     }
 
-    // 2. Selector chuẩn assistant message
+    // 2. data-is-streaming container (selector thực tế Claude.ai)
+    const streamingEl = document.querySelector('[data-is-streaming]');
+    if (streamingEl) {
+        return (streamingEl.innerText || streamingEl.textContent || '').trim();
+    }
+
+    // 3. Fallback các selector cũ
     const assistantMsgs = Array.from(document.querySelectorAll(
         '[data-message-author-role="assistant"], .font-claude-message'
     ));
@@ -33,27 +39,26 @@ _JS_GET_LAST_RESPONSE = """
         return prose ? prose.innerText : lastMsg.innerText;
     }
 
-    // 3. Fallback .prose
-    const proses = Array.from(document.querySelectorAll('.prose'));
-    if (proses.length > 0) {
-        return proses[proses.length - 1].innerText;
-    }
-
     return "";
 }
 """
 
-# JS lấy bất kỳ text nào từ Claude — dùng khi chờ ack system prompt (không cần JSON)
+# JS lấy bất kỳ text nào từ Claude — dùng khi chờ ack system prompt
 _JS_GET_ANY_RESPONSE = """
 () => {
-    // Thử tất cả selector có thể có text của Claude
+    // data-is-streaming container
+    const streamingEl = document.querySelector('[data-is-streaming]');
+    if (streamingEl) {
+        const text = (streamingEl.innerText || streamingEl.textContent || '').trim();
+        if (text.length > 5) return text;
+    }
+
+    // Fallback các selector cũ
     const selectors = [
         '[data-message-author-role="assistant"]',
         '.font-claude-message',
         '[data-testid="assistant-message"]',
         '.prose',
-        '[class*="claude-message"]',
-        '[class*="assistant"]',
     ];
     for (const sel of selectors) {
         const els = Array.from(document.querySelectorAll(sel));
@@ -61,6 +66,26 @@ _JS_GET_ANY_RESPONSE = """
             const last = els[els.length - 1];
             const text = last.innerText || last.textContent || '';
             if (text.trim().length > 5) return text.trim();
+        }
+    }
+    return "";
+}
+"""
+
+# JS detect lỗi network / error toast của Claude UI
+_JS_GET_ERROR = """
+() => {
+    const selectors = [
+        '[data-testid="error-message"]',
+        '.error-message',
+        '[role="alert"]',
+        '[class*="error"]',
+        '[class*="Error"]',
+    ];
+    for (const sel of selectors) {
+        for (const el of document.querySelectorAll(sel)) {
+            const t = (el.innerText || el.textContent || '').trim();
+            if (t.length > 5) return t;
         }
     }
     return "";
@@ -95,70 +120,99 @@ _JS_IS_GENERATING = """
 """
 
 
-def _wait_response(page, timeout: int = 300, log_fn=print,
-                   ack_mode: bool = False) -> str:
-    """
-    Chờ Claude stream xong bằng polling.
+def _count_streaming_els(page) -> int:
+    """Đếm số element data-is-streaming hiện có — dùng để detect response mới."""
+    try:
+        return page.evaluate("() => document.querySelectorAll('[data-is-streaming]').length")
+    except Exception:
+        return 0
 
-    ack_mode=True  — chờ system prompt ack: timeout ngắn, lấy bất kỳ text nào,
-                     stable 2 lần là đủ (Claude chỉ trả 1-2 câu xác nhận).
-    ack_mode=False — chờ article response: timeout dài, lấy JSON code block,
-                     stable 4 lần để chắc chắn stream xong.
+
+def _wait_response(page, timeout: int = 300, log_fn=print,
+                   ack_mode: bool = False, prev_count: int = 0) -> str:
     """
-    label = "ack system prompt" if ack_mode else "article response"
+    Chờ Claude xong bằng wait_for_function (event-driven, ~100ms poll của Playwright).
+
+    prev_count: số data-is-streaming elements trước khi gửi message —
+                dùng để tránh lấy response cũ ngay lập tức.
+    """
+    label   = "ack system prompt" if ack_mode else "article response"
+    min_len = 5 if ack_mode else 50
+    get_js  = _JS_GET_ANY_RESPONSE if ack_mode else _JS_GET_LAST_RESPONSE
     log_fn(f"  Chờ Claude {label} (timeout {timeout}s)...")
 
-    get_js       = _JS_GET_ANY_RESPONSE if ack_mode else _JS_GET_LAST_RESPONSE
-    stable_need  = 2 if ack_mode else 4
-    min_len      = 3 if ack_mode else 50
-    poll         = 2 if ack_mode else 3
+    _JS_WAIT_DONE = f"""
+    () => {{
+        // 1. Error toast
+        for (const sel of ['[role="alert"]', '[class*="ErrorMessage"]',
+                            '[data-testid="error-message"]', '.error-message']) {{
+            for (const el of document.querySelectorAll(sel)) {{
+                const t = (el.innerText || el.textContent || '').trim();
+                if (t.length > 5) return 'ERR:' + t.slice(0, 200);
+            }}
+        }}
+        // 2. Phải có nhiều hơn {prev_count} element — tức là response mới đã xuất hiện
+        const allEls = document.querySelectorAll('[data-is-streaming]');
+        if (allEls.length <= {prev_count}) return false;
+        // 3. Element mới nhất phải đã xong streaming
+        const last = allEls[allEls.length - 1];
+        if (last.getAttribute('data-is-streaming') === 'true') return false;
+        // 4. Đủ text
+        const text = (last.innerText || last.textContent || '').trim();
+        return text.length >= {min_len};
+    }}
+    """
 
-    deadline     = time.time() + timeout
-    last_text    = ""
-    stable_count = 0
-
-    # Đợi 1 chút để Claude bắt đầu render
-    time.sleep(2 if ack_mode else poll)
-
-    while time.time() < deadline:
-        try:
-            current = page.evaluate(get_js) or ""
-            current = current.strip()
-        except Exception:
-            current = ""
-
-        try:
-            still_generating = page.evaluate(_JS_IS_GENERATING)
-        except Exception:
-            still_generating = False
-
-        if still_generating:
-            if len(current) != len(last_text):
-                log_fn(f"  Đang stream... ({len(current)} ký tự)")
-            stable_count = 0
-            last_text    = current
-            time.sleep(poll)
-            continue
-
-        if current == last_text and len(current) >= min_len:
-            stable_count += 1
-            if stable_count >= stable_need:
-                elapsed = int(time.time() - (deadline - timeout))
-                log_fn(f"  Claude xong sau ~{elapsed}s — {len(current)} ký tự")
-                return current
-        else:
-            stable_count = 0
-
-        last_text = current
-        time.sleep(poll)
-
-    # Hard timeout — lấy bất cứ thứ gì đang có
-    log_fn(f"  ⚠ Timeout {timeout}s — lấy text hiện tại ({len(last_text)} ký tự)")
+    t0 = time.time()
     try:
-        page.screenshot(path=os.path.abspath("debug_screenshot.png"), full_page=True)
-    except Exception:
-        pass
-    return last_text
+        result = page.wait_for_function(
+            _JS_WAIT_DONE,
+            timeout=timeout * 1000,  # Playwright dùng ms
+        )
+        val = result.json_value() if result else None
+        elapsed = int(time.time() - t0)
+
+        if isinstance(val, str) and val.startswith("ERR:"):
+            err_msg = val[4:]
+            if any(kw in err_msg.lower() for kw in
+                   ["couldn't connect", "cannot connect", "network"]):
+                raise ConnectionError(f"Claude UI báo lỗi mạng: {err_msg}")
+            log_fn(f"  ⚠ Claude UI có thông báo: {err_msg[:100]}")
+
+        # Lấy text thực sự
+        text = page.evaluate(get_js) or ""
+        text = text.strip()
+        log_fn(f"  Claude xong sau ~{elapsed}s — {len(text)} ký tự")
+        return text
+
+    except PWTimeout:
+        log_fn(f"  ⚠ Timeout {timeout}s — lấy text hiện tại")
+        try:
+            page.screenshot(path=os.path.abspath("debug_screenshot.png"), full_page=True)
+            # Dump data-* attrs để debug selector
+            debug_info = page.evaluate("""() => {
+                const out = [];
+                document.querySelectorAll('*').forEach(el => {
+                    const attrs = Array.from(el.attributes).filter(a => a.name.startsWith('data-'));
+                    if (attrs.length > 0) {
+                        const text = (el.innerText || '').trim();
+                        if (text.length > 30)
+                            out.push(attrs.map(a => a.name+'='+a.value.slice(0,40)).join(' ') + ' | len='+text.length);
+                    }
+                });
+                return [...new Set(out)].slice(0, 30).join('\\n');
+            }""")
+            with open(os.path.abspath("debug_dom_attrs.txt"), "w", encoding="utf-8") as f:
+                f.write(debug_info or "(empty)")
+            log_fn("  Debug DOM saved: debug_screenshot.png, debug_dom_attrs.txt")
+        except Exception:
+            pass
+        return page.evaluate(get_js) or ""
+    except ConnectionError:
+        raise
+    except Exception as e:
+        log_fn(f"  ⚠ wait_for_function lỗi: {e} — fallback lấy text hiện tại")
+        return page.evaluate(get_js) or ""
 
 
 
@@ -201,11 +255,7 @@ def _click_send(page, log_fn=print):
 def _send_text(page, text: str, log_fn=print):
     """
     Gửi text vào input box Claude qua clipboard (Ctrl+V).
-    Dùng clipboard thật để Claude.ai parse được URL trong text và trigger web fetch.
-    insert_text() không trigger URL detection của Claude UI.
     """
-    import subprocess, sys
-
     inp = _get_input_box(page)
     inp.click()
     time.sleep(0.3)
@@ -216,22 +266,15 @@ def _send_text(page, text: str, log_fn=print):
     page.keyboard.press("Backspace")
     time.sleep(0.1)
 
-    # Đưa text vào clipboard qua PowerShell (không cần thư viện ngoài)
+    # Set clipboard rồi paste
     _set_clipboard(text)
+    time.sleep(0.5)
+    page.keyboard.press("Control+v")
+    time.sleep(1.5)
+    page.keyboard.press("Space")
     time.sleep(0.3)
 
-    # Paste vào input box
-    page.keyboard.press("Control+v")
-    time.sleep(1.5)  # Đợi Claude.ai parse URL và trigger web fetch indicator
-
-    # Gõ thêm space để React nhận diện có text (bắt buộc)
-    page.keyboard.press("Space")
-    time.sleep(0.5)
-
-    current = page.evaluate(
-        "() => document.querySelector('[contenteditable=\"true\"]')?.innerText || ''"
-    )
-    log_fn(f"  Đã paste {len(text)} chars (DOM text len: {len(current.strip())})")
+    log_fn(f"  Đã paste {len(text)} chars")
 
 
 def _set_clipboard(text: str):
@@ -292,14 +335,25 @@ def _send_urls_for_fetch(page, urls: list[str], log_fn=print):
     log_fn(f"  Fetch xong: {r[:120] if r else '(không lấy được text ack)'}")
 
 
+def _wait_idle(page, log_fn=print, timeout: int = 10):
+    """Poll cho đến khi Claude không còn generating. Tối đa timeout giây."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if not page.evaluate(_JS_IS_GENERATING):
+                return
+        except Exception:
+            return
+        time.sleep(1)
+
+
 def run_annotation(system_prompt: str, article_prompt: str,
                    urls: list[str] | None = None, log_fn=print) -> str:
     """
     Connect vào Chrome thật qua CDP (port 9222).
     Chrome phải đã mở claude.ai và đã login.
 
-    urls: danh sách URL cần fetch — gửi riêng trước article prompt
-          để Claude.ai trigger web fetch tự động.
+    urls: không dùng nữa — URL đã nằm trong article_prompt, Claude tự fetch.
     """
     with sync_playwright() as p:
         try:
@@ -329,36 +383,42 @@ def run_annotation(system_prompt: str, article_prompt: str,
         if claude_page is None:
             log_fn("Mở tab Claude mới...")
             claude_page = ctx.new_page()
-            claude_page.goto(CLAUDE_URL, wait_until="domcontentloaded", timeout=60000)
-            time.sleep(4)
         else:
             log_fn(f"Dùng tab Claude: {claude_page.url}")
-            claude_page.goto(CLAUDE_URL, wait_until="domcontentloaded", timeout=60000)
-            time.sleep(3)
+
+        claude_page.goto(CLAUDE_URL, wait_until="domcontentloaded", timeout=60000)
+        # Chờ input box thực sự render (React hydrate xong) thay vì sleep cứng
+        try:
+            claude_page.wait_for_selector(
+                '[contenteditable="true"], textarea',
+                timeout=15000,
+            )
+            log_fn("  Input box sẵn sàng.")
+        except PWTimeout:
+            log_fn("  ⚠ Input box chưa thấy sau 15s — tiếp tục thử.")
 
         if "login" in claude_page.url or "auth" in claude_page.url:
             raise RuntimeError("Claude chưa login — hãy login trong Chrome rồi chạy lại")
 
         # === STEP 1: System prompt ===
         log_fn("Gửi system prompt (rule.md)...")
+        c0 = _count_streaming_els(claude_page)
         _send_text(claude_page, system_prompt, log_fn)
         _click_send(claude_page, log_fn)
 
-        # Đợi Claude ack — thường 10-20s, dùng ack_mode để lấy text thường (không cần JSON)
-        r1 = _wait_response(claude_page, timeout=30, log_fn=log_fn, ack_mode=True)
+        r1 = _wait_response(claude_page, timeout=60, log_fn=log_fn, ack_mode=True, prev_count=c0)
         log_fn(f"Claude confirm: {r1[:100] if r1 else '(không lấy được text — tiếp tục)'}")
 
-        # === STEP 2: Gửi URL riêng để trigger web fetch ===
-        if urls:
-            _send_urls_for_fetch(claude_page, urls, log_fn)
+        _wait_idle(claude_page, log_fn)
 
-        # === STEP 3: Article prompt (không có URL — Claude đã đọc ở step 2) ===
+        # === STEP 2: Article prompt ===
         log_fn("Gửi dữ liệu bài viết...")
+        c1 = _count_streaming_els(claude_page)
         _send_text(claude_page, article_prompt, log_fn)
         _click_send(claude_page, log_fn)
 
         log_fn("Chờ Claude xử lý + trả JSON...")
-        response = _wait_response(claude_page, timeout=300, log_fn=log_fn, ack_mode=False)
+        response = _wait_response(claude_page, timeout=600, log_fn=log_fn, ack_mode=False, prev_count=c1)
 
         return response
 
@@ -370,7 +430,7 @@ def run_annotation_with_retry(
     log_fn=print,
     max_retries: int = 3,
 ) -> str:
-    """Wrapper retry."""
+    """Wrapper retry — legacy mode (toàn bài 1 lần)."""
     last_err = None
     for attempt in range(1, max_retries + 1):
         try:
@@ -381,6 +441,158 @@ def run_annotation_with_retry(
             last_err = e
             log_fn(f"Lần {attempt}/{max_retries} thất bại: {e}")
             if attempt < max_retries:
-                log_fn("Retry sau 5s...")
-                time.sleep(5)
+                wait = 15 if isinstance(e, ConnectionError) else 5
+                log_fn(f"Retry sau {wait}s...")
+                time.sleep(wait)
     raise RuntimeError(f"Thất bại sau {max_retries} lần. Lỗi cuối: {last_err}")
+
+
+def _connect_claude_page(log_fn=print):
+    """
+    Connect CDP, tìm/tạo tab Claude, navigate đến /new.
+    Trả về (playwright_instance, browser, page) — caller chịu trách nhiệm đóng.
+    """
+    import playwright.sync_api as pw_api
+    p = pw_api.sync_playwright().start()
+    try:
+        browser = p.chromium.connect_over_cdp(f"http://localhost:{DEBUG_PORT}")
+    except Exception as e:
+        p.stop()
+        raise RuntimeError(
+            f"Không connect được Chrome (port {DEBUG_PORT}).\n"
+            f"Hãy chạy: python login_claude.py\nLỗi: {e}"
+        )
+
+    contexts = browser.contexts
+    if not contexts:
+        p.stop()
+        raise RuntimeError("Chrome không có tab nào mở")
+
+    ctx = contexts[0]
+    claude_page = next((pg for pg in ctx.pages if "claude.ai" in pg.url), None)
+
+    if claude_page is None:
+        log_fn("Mở tab Claude mới...")
+        claude_page = ctx.new_page()
+    else:
+        log_fn(f"Dùng tab Claude: {claude_page.url}")
+
+    claude_page.goto(CLAUDE_URL, wait_until="domcontentloaded", timeout=60000)
+    try:
+        claude_page.wait_for_selector('[contenteditable="true"], textarea', timeout=15000)
+        log_fn("  Input box sẵn sàng.")
+    except PWTimeout:
+        log_fn("  ⚠ Input box chưa thấy sau 15s — tiếp tục thử.")
+
+    if "login" in claude_page.url or "auth" in claude_page.url:
+        p.stop()
+        raise RuntimeError("Claude chưa login — hãy login trong Chrome rồi chạy lại")
+
+    return p, browser, claude_page
+
+
+def _send_and_wait(page, text: str, timeout: int, ack_mode: bool,
+                   log_fn=print, max_retries: int = 2) -> str:
+    """
+    Gửi 1 message và chờ response. Retry nếu response rỗng.
+    Raise nếu hết retry.
+    """
+    for attempt in range(1, max_retries + 1):
+        c = _count_streaming_els(page)
+        _send_text(page, text, log_fn)
+        _click_send(page, log_fn)
+        resp = _wait_response(page, timeout=timeout, log_fn=log_fn,
+                              ack_mode=ack_mode, prev_count=c)
+        if resp and resp.strip():
+            return resp
+        log_fn(f"  ⚠ Response rỗng (attempt {attempt}/{max_retries})")
+        _wait_idle(page, log_fn)
+    raise RuntimeError("Response rỗng sau tất cả retry")
+
+
+def run_annotation_per_claim(
+    system_prompt: str,
+    header_prompt: str,
+    claim_prompts: list[str],
+    footer_prompt_fn,           # callable() → str, gọi sau khi tất cả claim xong
+    log_fn=print,
+    on_claim_done=None,
+    claim_timeout: int = 180,
+    claim_max_retries: int = 2,
+) -> tuple[list[str], str]:
+    """
+    Per-claim annotation trong 1 conversation:
+      1. Mở session, gửi system_prompt → ack
+      2. Gửi header_prompt → ack
+      3. Với mỗi claim_prompts[i]:
+           - Gửi → chờ response (timeout claim_timeout)
+           - Retry tối đa claim_max_retries nếu rỗng
+           - Nếu vẫn fail → ghi chuỗi lỗi, tiếp tục claim kế
+           - Gọi on_claim_done(i, raw_response_or_error_str)
+      4. Gọi footer_prompt_fn() → build footer với claims đã xong
+         Gửi footer → lấy article-level JSON
+      5. Trả về (claim_raws, article_raw)
+
+    on_claim_done(idx: int, raw: str) — callback realtime, có thể None.
+    raw là JSON string hoặc chuỗi 'TOOL_ERROR:...' nếu fail.
+    footer_prompt_fn: callable không tham số, trả str — gọi sau tất cả claim.
+    """
+    p, browser, page = _connect_claude_page(log_fn)
+    try:
+        # STEP 1: System prompt
+        log_fn("Gửi system prompt...")
+        _send_and_wait(page, system_prompt, timeout=60, ack_mode=True, log_fn=log_fn)
+
+        # STEP 2: Header — giới thiệu bài + quy trình
+        log_fn("Gửi header bài viết...")
+        _wait_idle(page, log_fn)
+        _send_and_wait(page, header_prompt, timeout=60, ack_mode=True, log_fn=log_fn)
+
+        # STEP 3: Từng claim
+        claim_raws = []
+        total = len(claim_prompts)
+        for i, cp in enumerate(claim_prompts):
+            log_fn(f"\n  [Claim {i+1}/{total}] Gửi...")
+            _wait_idle(page, log_fn)
+            raw = ""
+            try:
+                raw = _send_and_wait(
+                    page, cp,
+                    timeout=claim_timeout,
+                    ack_mode=False,
+                    log_fn=log_fn,
+                    max_retries=claim_max_retries,
+                )
+                log_fn(f"  [Claim {i+1}/{total}] Nhận {len(raw)} ký tự")
+            except Exception as e:
+                raw = f"TOOL_ERROR: {e}"
+                log_fn(f"  [Claim {i+1}/{total}] ⚠ Lỗi: {e} — tiếp tục claim kế")
+
+            claim_raws.append(raw)
+            if on_claim_done:
+                on_claim_done(i, raw)
+
+        # STEP 4: Footer — build sau khi tất cả claim xong rồi gửi
+        article_raw = ""
+        try:
+            footer_prompt = footer_prompt_fn() if callable(footer_prompt_fn) else ""
+        except Exception as e:
+            footer_prompt = ""
+            log_fn(f"  ⚠ Build footer lỗi: {e}")
+
+        if footer_prompt and footer_prompt.strip():
+            log_fn("\n  Gửi footer (article-level)...")
+            _wait_idle(page, log_fn)
+            try:
+                article_raw = _send_and_wait(
+                    page, footer_prompt,
+                    timeout=120, ack_mode=False, log_fn=log_fn,
+                )
+            except Exception as e:
+                article_raw = f"TOOL_ERROR: {e}"
+                log_fn(f"  ⚠ Footer lỗi: {e}")
+
+        return claim_raws, article_raw
+
+    finally:
+        p.stop()
