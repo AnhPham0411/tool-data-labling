@@ -462,9 +462,12 @@ class App:
         body = tk.Frame(root, bg=BG)
         body.pack(fill="both", expand=True)
 
-        left = tk.Frame(body, bg=BG)
-        left.pack(side="left", fill="both", expand=True, padx=20, pady=16)
+        # Left panel: width cố định 420px, không co giãn theo content
+        left = tk.Frame(body, bg=BG, width=420)
+        left.pack(side="left", fill="y", padx=20, pady=16)
+        left.pack_propagate(False)  # giữ width cố định dù content ngắn/dài
 
+        # Right panel: lấy toàn bộ phần còn lại
         right = tk.Frame(body, bg=BG)
         right.pack(side="right", fill="both", expand=True, padx=(0, 20), pady=16)
 
@@ -476,11 +479,11 @@ class App:
 
         self._dz_art = DropZone(dz_row, "Bài viết chính",
                                  on_change=self._on_article_drop,
-                                 width=280, height=130)
-        self._dz_art.pack(side="left", padx=(0, 10))
+                                 width=190, height=120)
+        self._dz_art.pack(side="left", padx=(0, 8))
 
         self._dz_ref = DropZone(dz_row, "Tài liệu Ref PDF",
-                                 width=280, height=130)
+                                 width=190, height=120)
         self._dz_ref.pack(side="left")
 
         # Warning banner (ẩn mặc định)
@@ -500,7 +503,7 @@ class App:
         self._title_var = tk.StringVar(value="")
         self._title_lbl = tk.Label(r0, textvariable=self._title_var,
                                     font=FONT_SMALL, bg=CARD, fg=FG,
-                                    wraplength=380, anchor="w", justify="left")
+                                    wraplength=270, anchor="w", justify="left")
         self._title_lbl.pack(side="left", padx=6)
 
         tk.Frame(info, bg=BORDER, height=1).pack(fill="x", padx=14)
@@ -574,6 +577,15 @@ class App:
 
         run_row = tk.Frame(left, bg=BG)
         run_row.pack(fill="x", pady=(0, 6))
+
+        self._chrome_btn = tk.Button(
+            run_row, text="🌐  Mở Chrome",
+            font=FONT_BTN, bg="#374151", fg=CARD,
+            activebackground="#4B5563", activeforeground=CARD,
+            relief="flat", bd=0, padx=16, pady=10,
+            cursor="hand2", command=self._on_open_chrome,
+        )
+        self._chrome_btn.pack(side="left", padx=(0, 8))
 
         self._run_btn = tk.Button(
             run_row, text="▶  RUN ANNOTATION",
@@ -783,6 +795,37 @@ class App:
                 return False
 
         return True
+
+    # ── OPEN CHROME ──────────────────────────────────────────────────────────
+
+    def _on_open_chrome(self):
+        """Tìm Chrome và mở với remote debugging port 9222."""
+        chrome = _find_chrome()
+        if not chrome:
+            messagebox.showerror(
+                "Không tìm thấy Chrome",
+                "Không tìm thấy Google Chrome trên máy.\n\n"
+                "Hãy cài Chrome từ https://www.google.com/chrome/ rồi thử lại."
+            )
+            return
+
+        profile_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chrome_profile")
+        cmd = [
+            chrome,
+            "--remote-debugging-port=9222",
+            f"--user-data-dir={profile_dir}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "https://claude.ai",
+        ]
+        try:
+            subprocess.Popen(cmd)
+            self._set_status("Chrome đang mở — đăng nhập Claude.ai rồi bấm RUN", WARN)
+            self._log("Chrome đã mở với remote debugging port 9222.")
+            self._log("→ Đăng nhập Claude.ai trong cửa sổ Chrome vừa mở.")
+            self._log("→ Sau khi vào được chat page, bấm RUN ANNOTATION.")
+        except Exception as e:
+            messagebox.showerror("Lỗi mở Chrome", str(e))
 
     # ── RUN ───────────────────────────────────────────────────────────────────
 
@@ -1072,7 +1115,7 @@ def _validate_claims(claims: list, log_fn) -> None:
             log_fn(f"  ... và {len(issues)-8} cảnh báo khác", "warn")
 
 
-# ─── Chrome CDP ping ──────────────────────────────────────────────────────────
+# ─── Chrome utils ─────────────────────────────────────────────────────────────
 
 def _check_chrome_cdp(port: int = 9222) -> bool:
     """Kiểm tra nhanh Chrome có đang lắng nghe CDP không."""
@@ -1082,6 +1125,31 @@ def _check_chrome_cdp(port: int = 9222) -> bool:
         return True
     except Exception:
         return False
+
+
+def _find_chrome() -> str:
+    """Tìm Chrome executable trên Windows — thử nhiều path phổ biến."""
+    candidates = [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+        os.path.expandvars(r"%PROGRAMFILES%\Google\Chrome\Application\chrome.exe"),
+        os.path.expandvars(r"%PROGRAMFILES(X86)%\Google\Chrome\Application\chrome.exe"),
+    ]
+    # Thử tìm qua registry
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                             r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe")
+        path, _ = winreg.QueryValueEx(key, "")
+        if path and os.path.exists(path):
+            return path
+    except Exception:
+        pass
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return ""
 
 
 # ─── Merge helper ─────────────────────────────────────────────────────────────
