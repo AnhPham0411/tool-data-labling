@@ -1187,12 +1187,38 @@ def _merge_rows(sections, claude_claims, title,
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
+def _show_splash(duration_ms: int = 2200):
+    """Splash screen đơn giản — hiện trước khi main window load."""
+    splash = tk.Tk()
+    splash.overrideredirect(True)   # không có titlebar
+    splash.configure(bg="#1F3864")
+
+    sw, sh = splash.winfo_screenwidth(), splash.winfo_screenheight()
+    w, h = 380, 180
+    splash.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
+
+    tk.Label(splash, text="Vivipedia", font=("Segoe UI", 28, "bold"),
+             bg="#1F3864", fg="white").pack(pady=(36, 4))
+    tk.Label(splash, text="Annotation Tool", font=("Segoe UI", 13),
+             bg="#1F3864", fg="#93C5FD").pack()
+    tk.Label(splash, text="Đang khởi động...", font=("Segoe UI", 9),
+             bg="#1F3864", fg="#6B7280").pack(pady=(18, 0))
+
+    splash.update()
+    return splash
+
+
 if __name__ == "__main__":
+    splash = _show_splash()
+
     try:
         import tkinterdnd2
         root = tkinterdnd2.Tk()
     except ImportError:
         root = tk.Tk()
 
+    root.withdraw()          # ẩn main window trong lúc build UI
     App(root)
+    splash.destroy()         # đóng splash sau khi UI xong
+    root.deiconify()         # hiện main window
     root.mainloop()
