@@ -818,6 +818,13 @@ class App:
 
     def _on_open_chrome(self):
         """Tìm Chrome và mở với remote debugging port 9222."""
+        # Nếu Chrome đã chạy trên port 9222 → không mở thêm
+        if _check_chrome_cdp():
+            self._set_status("Chrome đã sẵn sàng — bấm RUN ANNOTATION", WARN)
+            self._log("Chrome đã đang chạy trên port 9222.")
+            self._log("→ Bấm RUN ANNOTATION để bắt đầu.")
+            return
+
         chrome = _find_chrome()
         if not chrome:
             messagebox.showerror(
@@ -1214,6 +1221,16 @@ def _merge_rows(sections, claude_claims, title,
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    # Chỉ cho phép 1 instance — dùng Windows Mutex
+    import ctypes
+    _mutex = ctypes.windll.kernel32.CreateMutexW(None, True, "VivipediaAnnotationTool_SingleInstance")
+    if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        import tkinter.messagebox as _mb
+        _r = tk.Tk(); _r.withdraw()
+        _mb.showerror("Đã chạy", "Vivipedia Annotation Tool đang chạy rồi.\nKhông thể mở thêm.")
+        _r.destroy()
+        raise SystemExit
+
     try:
         import tkinterdnd2
         root = tkinterdnd2.Tk()
