@@ -861,10 +861,12 @@ class App:
             )
             return
 
-        if getattr(sys, "frozen", False):
-            profile_dir = os.path.join(os.path.dirname(sys.executable), "chrome_profile")
-        else:
-            profile_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chrome_profile")
+        # Profile dir phải nằm ngoài Program Files (không cần quyền admin)
+        profile_dir = os.path.join(
+            os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+            "VivipediaAnnotationTool", "chrome_profile"
+        )
+        os.makedirs(profile_dir, exist_ok=True)
         cmd = [
             chrome,
             "--remote-debugging-port=9222",

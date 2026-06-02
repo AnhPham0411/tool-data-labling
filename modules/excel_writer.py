@@ -14,9 +14,10 @@ from openpyxl.utils import get_column_letter
 
 def _base_dir() -> str:
     if getattr(sys, "frozen", False):
-        # PyInstaller folder mode: datas nằm trong _internal/ (sys._MEIPASS)
-        # Nhưng outputs/ cần nằm cạnh exe để user truy cập dễ
-        return os.path.dirname(sys.executable)
+        # outputs/ nằm trong Documents để user dễ tìm và có quyền ghi
+        docs = os.path.join(os.path.expanduser("~"), "Documents", "VivipediaAnnotation")
+        os.makedirs(docs, exist_ok=True)
+        return docs
     return os.path.join(os.path.dirname(__file__), "..")
 
 OUTPUT_PATH = os.path.join(_base_dir(), "outputs", "annotation_output.xlsx")
