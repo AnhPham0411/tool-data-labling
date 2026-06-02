@@ -10,7 +10,18 @@ import sys
 import subprocess
 from datetime import date
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+if getattr(sys, "frozen", False):
+    _app_dir = os.path.dirname(sys.executable)
+    sys.path.insert(0, _app_dir)
+    # Ghi mọi exception ra file log cạnh exe để debug
+    import traceback as _tb
+    _log_path = os.path.join(_app_dir, "error.log")
+    def _excepthook(exc_type, exc_val, exc_tb):
+        with open(_log_path, "a", encoding="utf-8") as f:
+            f.write("".join(_tb.format_exception(exc_type, exc_val, exc_tb)) + "\n")
+    sys.excepthook = _excepthook
+else:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from modules.pdf_parser      import parse_article
 from modules.ref_parser      import parse_ref
@@ -464,7 +475,7 @@ class App:
 
         # Left panel: width cố định 420px, không co giãn theo content
         left = tk.Frame(body, bg=BG, width=420)
-        left.pack(side="left", fill="y", padx=20, pady=16)
+        left.pack(side="left", fill="both", padx=20, pady=16)
         left.pack_propagate(False)  # giữ width cố định dù content ngắn/dài
 
         # Right panel: lấy toàn bộ phần còn lại
@@ -503,8 +514,8 @@ class App:
         self._title_var = tk.StringVar(value="")
         self._title_lbl = tk.Label(r0, textvariable=self._title_var,
                                     font=FONT_SMALL, bg=CARD, fg=FG,
-                                    wraplength=270, anchor="w", justify="left")
-        self._title_lbl.pack(side="left", padx=6)
+                                    wraplength=240, anchor="w", justify="left")
+        self._title_lbl.pack(side="left", padx=6, fill="x", expand=True)
 
         tk.Frame(info, bg=BORDER, height=1).pack(fill="x", padx=14)
 
@@ -699,9 +710,8 @@ class App:
                             self._domain_var.set(f"{k} — {v}")
                             break
                 self._update_rule_indicator()
-
-                self._dz_art.set_state(DropZone.STATE_OK)
                 self._dz_art._path = path
+                self._dz_art.set_state(DropZone.STATE_OK)
 
             except ValidationError as e:
                 self._dz_art.set_state(DropZone.STATE_ERROR, str(e)[:60])
@@ -712,8 +722,16 @@ class App:
                 else:
                     self._warn_banner.show(str(e))
             except Exception as e:
+                import traceback
+                tb = traceback.format_exc()
                 self._dz_art.set_state(DropZone.STATE_ERROR, "Lỗi đọc PDF")
                 self._title_var.set(f"Lỗi: {e}")
+                self._log(f"Lỗi đọc PDF: {e}", "err")
+                self._log(tb, "dim")
+                if getattr(sys, "frozen", False):
+                    _lp = os.path.join(os.path.dirname(sys.executable), "error.log")
+                    with open(_lp, "a", encoding="utf-8") as _f:
+                        _f.write(f"=== Lỗi đọc PDF: {path} ===\n{tb}\n")
 
         threading.Thread(target=_read, daemon=True).start()
 
@@ -784,15 +802,15 @@ class App:
         if not _check_chrome_cdp():
             answer = messagebox.askyesno(
                 "Chrome chưa sẵn sàng",
-                "Không kết nối được Chrome qua CDP (port 9222).\n\n"
-                "Nguyên nhân thường gặp:\n"
-                "• Chrome chưa mở với --remote-debugging-port=9222\n"
-                "• Chrome chưa đăng nhập claude.ai\n\n"
-                "Chạy file login_claude.py để mở Chrome đúng cách.\n\n"
-                "Vẫn muốn thử tiếp tục?", icon="warning"
+                "Chrome chưa được mở đúng cách.\n\n"
+                "Bạn cần mở Chrome với chế độ debug trước khi chạy annotation.\n\n"
+                "Nhấn OK để mở Chrome ngay bây giờ,\n"
+                "sau đó đăng nhập Claude.ai rồi quay lại bấm RUN.",
+                icon="warning",
             )
-            if not answer:
-                return False
+            if answer:
+                self._on_open_chrome()
+            return False  # Luôn dừng — user phải bấm RUN lại sau khi đăng nhập
 
         return True
 
@@ -809,7 +827,10 @@ class App:
             )
             return
 
-        profile_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chrome_profile")
+        if getattr(sys, "frozen", False):
+            profile_dir = os.path.join(os.path.dirname(sys.executable), "chrome_profile")
+        else:
+            profile_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chrome_profile")
         cmd = [
             chrome,
             "--remote-debugging-port=9222",
@@ -841,14 +862,19 @@ class App:
         self._prog.set(0.04)
         self._log_panel.clear()
         self._warn_banner.hide()
-        threading.Thread(target=self._pipeline, daemon=True).start()
+        # Đọc tất cả giá trị UI từ main thread trước khi spawn thread
+        _art_pdf = self._dz_art.path
+        _ref_pdf = self._dz_ref.path or None
+        _dk_hint = self._domain_key()
+        _ant     = self._ant_var.get().strip()
+        _today   = date.today().strftime("%Y-%m-%d")
+        threading.Thread(
+            target=self._pipeline,
+            args=(_art_pdf, _ref_pdf, _dk_hint, _ant, _today),
+            daemon=True,
+        ).start()
 
-    def _pipeline(self):
-        art_pdf = self._dz_art.path
-        ref_pdf = self._dz_ref.path or None
-        dk_hint = self._domain_key()
-        ant     = self._ant_var.get().strip()
-        today   = date.today().strftime("%Y-%m-%d")
+    def _pipeline(self, art_pdf, ref_pdf, dk_hint, ant, today):
 
         def step(n: float, msg: str):
             self._prog.set(n)
@@ -1187,38 +1213,33 @@ def _merge_rows(sections, claude_claims, title,
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
-def _show_splash(duration_ms: int = 2200):
-    """Splash screen đơn giản — hiện trước khi main window load."""
-    splash = tk.Tk()
-    splash.overrideredirect(True)   # không có titlebar
-    splash.configure(bg="#1F3864")
-
-    sw, sh = splash.winfo_screenwidth(), splash.winfo_screenheight()
-    w, h = 380, 180
-    splash.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
-
-    tk.Label(splash, text="Vivipedia", font=("Segoe UI", 28, "bold"),
-             bg="#1F3864", fg="white").pack(pady=(36, 4))
-    tk.Label(splash, text="Annotation Tool", font=("Segoe UI", 13),
-             bg="#1F3864", fg="#93C5FD").pack()
-    tk.Label(splash, text="Đang khởi động...", font=("Segoe UI", 9),
-             bg="#1F3864", fg="#6B7280").pack(pady=(18, 0))
-
-    splash.update()
-    return splash
-
-
 if __name__ == "__main__":
-    splash = _show_splash()
-
     try:
         import tkinterdnd2
         root = tkinterdnd2.Tk()
     except ImportError:
         root = tk.Tk()
 
-    root.withdraw()          # ẩn main window trong lúc build UI
-    App(root)
-    splash.destroy()         # đóng splash sau khi UI xong
-    root.deiconify()         # hiện main window
+    # Splash là Toplevel trên root — main loop chạy ngay, không bị lỗi thread
+    root.withdraw()
+    splash = tk.Toplevel(root)
+    splash.overrideredirect(True)
+    splash.configure(bg="#1F3864")
+    sw, sh = splash.winfo_screenwidth(), splash.winfo_screenheight()
+    w, h = 380, 180
+    splash.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
+    tk.Label(splash, text="Vivipedia", font=("Segoe UI", 28, "bold"),
+             bg="#1F3864", fg="white").pack(pady=(36, 4))
+    tk.Label(splash, text="Annotation Tool", font=("Segoe UI", 13),
+             bg="#1F3864", fg="#93C5FD").pack()
+    tk.Label(splash, text="Đang khởi động...", font=("Segoe UI", 9),
+             bg="#1F3864", fg="#6B7280").pack(pady=(18, 0))
+    splash.update()
+
+    def _launch():
+        App(root)
+        splash.destroy()
+        root.deiconify()
+
+    root.after(100, _launch)   # build UI sau 1 tick để splash render kịp
     root.mainloop()

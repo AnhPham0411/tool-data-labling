@@ -84,9 +84,17 @@ Với mỗi claim theo mức rủi ro:
 → Nếu chỉ là metadata (tên, ngày, tóm tắt) mà không có nội dung điều trị → **SC tối đa 0.20**
 
 **Khi URL không truy cập được (403, 404, timeout, chặn bot):**
-→ Đặt `fact_check_status = ERROR`. Không cố search thay thế.
-→ Ghi notes: `SF=N/A | SC=0.05 | SQ=0.05` — HR vẫn chấm theo nội dung claim.
-→ Dòng này sẽ được đánh dấu để người review kiểm tra thủ công.
+→ **Vẫn phải web search** để verify claim — URL lỗi không miễn trừ bước search.
+→ Với CRITICAL/STANDARD: search như bình thường, dùng kết quả search để chấm SF/SC/HR.
+→ Ghi `SF=N/A` (vì URL gốc không đọc được), SC/HR dựa trên kết quả search tìm được.
+→ SQ = 0.05 nếu **tất cả** URL đều lỗi và không tìm được nguồn thay thế.
+→ Chỉ đặt `fact_check_status = ERROR` khi **không thể search** (lỗi kỹ thuật), không phải khi URL lỗi.
+
+**Khi URL truy cập được nhưng nội dung không liên quan đến claim:**
+→ **Vẫn phải web search** — đây là tình huống Ref PDF bị gắn nhầm.
+→ Chấm SF=0.00 (URL không có nội dung liên quan), SC=0.05.
+→ Web search để tìm nguồn verify claim, dùng kết quả đó cho HR.
+→ SQ tra bảng theo tên miền URL gắn kèm — không hạ SQ vì nội dung không liên quan.
 
 **⚠️ Single-source bias:** Nếu bài dùng 10+ nguồn nhưng tất cả từ cùng 1 bệnh viện → **SC tối đa 0.74 toàn bài**. Ghi nhận vào Notes claim đầu tiên: *"Single-source bias: toàn bài dùng nguồn [tên bệnh viện] → SC giới hạn 0.74"*
 

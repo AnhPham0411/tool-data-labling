@@ -6,12 +6,18 @@ excel_writer.py — Tạo và ghi vào file Excel annotation v10.
 - Format: 4 dòng header, freeze pane C5, màu FF-prefix
 """
 import os
+import sys
 from datetime import date
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
-OUTPUT_PATH = os.path.join(os.path.dirname(__file__), "..", "outputs", "annotation_output.xlsx")
+def _base_dir() -> str:
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.join(os.path.dirname(__file__), "..")
+
+OUTPUT_PATH = os.path.join(_base_dir(), "outputs", "annotation_output.xlsx")
 
 # ── Màu fill — BẮT BUỘC dùng prefix FF (8 ký tự) ────────────────────────────
 # openpyxl hiểu 6 ký tự hex là alpha=00 (trong suốt) → màu không hiện

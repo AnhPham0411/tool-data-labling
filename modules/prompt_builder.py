@@ -10,6 +10,14 @@ Legacy (giữ lại, không dùng nữa):
   build_article_prompt()        — toàn bộ bài 1 lần
 """
 import os
+import sys
+
+def _base_dir() -> str:
+    """Root dir chứa rule files — hoạt động cả khi chạy từ exe (PyInstaller) và Python."""
+    if getattr(sys, "frozen", False):
+        # folder mode: exe nằm trong _internal/, rule files nằm cạnh exe
+        return os.path.dirname(sys.executable)
+    return os.path.join(os.path.dirname(__file__), "..")
 
 RULE_MAP = {
     "law": "rule-luat.md",
@@ -21,7 +29,7 @@ DEFAULT_RULE = "rule-xin.md"
 
 def load_rules(domain_key: str = "") -> str:
     filename = RULE_MAP.get(domain_key, DEFAULT_RULE)
-    path = os.path.join(os.path.dirname(__file__), "..", filename)
+    path = os.path.join(_base_dir(), filename)
     with open(path, encoding="utf-8") as f:
         return f.read()
 
@@ -212,17 +220,25 @@ def build_claim_prompt(claim_idx: int, total_claims: int,
             else:
                 claim_urls.append(url)
 
+    # Đếm URL lỗi để quyết định có cần nhắc search không
+    n_bad = sum(1 for u in claim_urls if "←" in u)
+    all_bad = len(claim_urls) > 0 and n_bad == len(claim_urls)
+
     if claim_urls:
-        url_block = "URL nguồn của claim này (mở và đọc trước khi fact-check):\n" + "\n".join(claim_urls)
+        url_block = "URL nguồn của claim này:\n" + "\n".join(claim_urls)
+        if all_bad:
+            url_block += "\n\n⚠️ Tất cả URL đều không truy cập được hoặc không liên quan — BẮT BUỘC web search để verify claim trước khi chấm điểm. Không được trả kết quả mà không search."
+        else:
+            url_block += "\n\nNếu URL không truy cập được hoặc nội dung không liên quan → vẫn phải web search để verify."
     else:
-        url_block = "URL nguồn: (không có — đặt fact_check_status = KHONG TIM THAY nếu không tìm được nguồn)"
+        url_block = "URL nguồn: (không có) — BẮT BUỘC web search để tìm nguồn verify claim."
 
     return f"""[Claim {claim_idx}/{total_claims}]
 {text}
 
 {url_block}
 
-Thực hiện đầy đủ 7 bước, trả về JSON 1 claim. Không markdown. Chỉ JSON."""
+Bắt buộc: mở URL + web search (nếu CRITICAL/STANDARD) TRƯỚC khi trả JSON. Chỉ JSON."""
 
 
 def build_article_footer_prompt(article: dict, claims_summary: list[dict]) -> str:
