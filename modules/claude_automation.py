@@ -279,21 +279,20 @@ def _send_text(page, text: str, log_fn=print):
 
 def _set_clipboard(text: str):
     """
-    Đưa text vào clipboard Windows qua PowerShell với encoding UTF-8.
-    Dùng utf-8-sig (UTF-8 BOM) để PowerShell 5.1 đọc đúng tiếng Việt.
+    Đưa text vào clipboard Windows.
+    Dùng PowerShell ẩn window (-WindowStyle Hidden) để không hiện CMD.
     """
     import subprocess, tempfile, os
-    # Ghi file với UTF-8 BOM — PowerShell 5.1 mặc định đọc UTF-16, BOM giúp nó detect UTF-8
     tmp_path = tempfile.mktemp(suffix=".txt")
     with open(tmp_path, "w", encoding="utf-8-sig") as f:
         f.write(text)
     try:
-        # -Encoding utf8 để đọc đúng, -Raw để giữ newline
         cmd = f"[System.IO.File]::ReadAllText('{tmp_path}', [System.Text.Encoding]::UTF8) | Set-Clipboard"
         subprocess.run(
-            ["powershell", "-Command", cmd],
+            ["powershell", "-WindowStyle", "Hidden", "-NonInteractive", "-Command", cmd],
             capture_output=True,
             timeout=15,
+            creationflags=0x08000000,  # CREATE_NO_WINDOW
         )
     finally:
         try:
@@ -517,7 +516,7 @@ def run_annotation_per_claim(
     footer_prompt_fn,           # callable() → str, gọi sau khi tất cả claim xong
     log_fn=print,
     on_claim_done=None,
-    claim_timeout: int = 180,
+    claim_timeout: int = 120,
     claim_max_retries: int = 2,
 ) -> tuple[list[str], str]:
     """

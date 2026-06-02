@@ -14,6 +14,8 @@ from openpyxl.utils import get_column_letter
 
 def _base_dir() -> str:
     if getattr(sys, "frozen", False):
+        # PyInstaller folder mode: datas nằm trong _internal/ (sys._MEIPASS)
+        # Nhưng outputs/ cần nằm cạnh exe để user truy cập dễ
         return os.path.dirname(sys.executable)
     return os.path.join(os.path.dirname(__file__), "..")
 

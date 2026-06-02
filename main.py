@@ -799,7 +799,17 @@ class App:
             return False
 
         # ── Tầng 5: Chrome CDP ───────────────────────────────────────────
-        if not _check_chrome_cdp():
+        # Poll tối đa 5s (Chrome vừa mở cần thời gian bind port)
+        chrome_ready = _check_chrome_cdp()
+        if not chrome_ready:
+            import time as _time
+            for _ in range(5):
+                _time.sleep(1)
+                if _check_chrome_cdp():
+                    chrome_ready = True
+                    break
+
+        if not chrome_ready:
             answer = messagebox.askyesno(
                 "Chrome chưa sẵn sàng",
                 "Chrome chưa được mở đúng cách.\n\n"
@@ -810,19 +820,36 @@ class App:
             )
             if answer:
                 self._on_open_chrome()
-            return False  # Luôn dừng — user phải bấm RUN lại sau khi đăng nhập
+            return False
 
         return True
 
     # ── OPEN CHROME ──────────────────────────────────────────────────────────
 
+    def _poll_chrome_ready(self, attempt: int = 0, max_attempts: int = 30):
+        """Poll mỗi 1s xem Chrome đã bind port 9222 chưa, tối đa 30s."""
+        if _check_chrome_cdp():
+            self._run_btn.config(state="normal", text="▶  RUN ANNOTATION",
+                                  bg=ACCENT, cursor="hand2")
+            self._chrome_btn.config(state="disabled", bg="#6B7280", cursor="arrow")
+            self._set_status("Chrome sẵn sàng — đăng nhập Claude.ai rồi bấm RUN", WARN)
+            self._log("✓ Chrome đã sẵn sàng (port 9222).")
+            return
+        if attempt >= max_attempts:
+            self._run_btn.config(state="normal", text="▶  RUN ANNOTATION",
+                                  bg=ACCENT, cursor="hand2")
+            self._set_status("Chrome chưa phản hồi — thử bấm RUN hoặc mở lại", WARN)
+            self._log("⚠ Chrome chưa bind port 9222 sau 30s.")
+            return
+        self._set_status(f"Chờ Chrome khởi động... ({attempt+1}s)", WARN)
+        self.root.after(1000, lambda: self._poll_chrome_ready(attempt + 1, max_attempts))
+
     def _on_open_chrome(self):
         """Tìm Chrome và mở với remote debugging port 9222."""
-        # Nếu Chrome đã chạy trên port 9222 → không mở thêm
         if _check_chrome_cdp():
             self._set_status("Chrome đã sẵn sàng — bấm RUN ANNOTATION", WARN)
             self._log("Chrome đã đang chạy trên port 9222.")
-            self._log("→ Bấm RUN ANNOTATION để bắt đầu.")
+            self._chrome_btn.config(state="disabled", bg="#6B7280", cursor="arrow")
             return
 
         chrome = _find_chrome()
@@ -847,12 +874,17 @@ class App:
             "https://claude.ai",
         ]
         try:
-            subprocess.Popen(cmd)
-            self._set_status("Chrome đang mở — đăng nhập Claude.ai rồi bấm RUN", WARN)
-            self._log("Chrome đã mở với remote debugging port 9222.")
+            self._log(f"  Chrome path: {chrome}")
+            self._log(f"  Profile dir: {profile_dir}")
+            proc = subprocess.Popen(cmd)
+            self._log(f"  Chrome PID: {proc.pid}")
             self._log("→ Đăng nhập Claude.ai trong cửa sổ Chrome vừa mở.")
-            self._log("→ Sau khi vào được chat page, bấm RUN ANNOTATION.")
+            self._log("→ Nút RUN sẽ tự mở khoá khi Chrome sẵn sàng.")
+            self._run_btn.config(state="disabled", bg="#9BADF7", cursor="arrow")
+            self._chrome_btn.config(state="disabled", bg="#6B7280", cursor="arrow")
+            self._poll_chrome_ready()
         except Exception as e:
+            self._log(f"  Lỗi mở Chrome: {e}", "err")
             messagebox.showerror("Lỗi mở Chrome", str(e))
 
     # ── RUN ───────────────────────────────────────────────────────────────────

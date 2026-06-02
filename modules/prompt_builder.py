@@ -15,8 +15,8 @@ import sys
 def _base_dir() -> str:
     """Root dir chứa rule files — hoạt động cả khi chạy từ exe (PyInstaller) và Python."""
     if getattr(sys, "frozen", False):
-        # folder mode: exe nằm trong _internal/, rule files nằm cạnh exe
-        return os.path.dirname(sys.executable)
+        # PyInstaller folder mode: datas nằm trong _internal/ (sys._MEIPASS)
+        return sys._MEIPASS
     return os.path.join(os.path.dirname(__file__), "..")
 
 RULE_MAP = {
