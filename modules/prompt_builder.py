@@ -196,7 +196,7 @@ Quy tắc bắt buộc:
 2. SF & SC: chấm dựa trên URL RAG gắn kèm claim. Nếu RAG không chứa nội dung claim → SF thấp, SC thấp.
 3. SQ: chấm theo tên miền URL RAG, không phải tên miền nguồn web search.
 4. Web search: chỉ dùng cho FACT-CHECK status và HR. KHÔNG thay thế nguồn RAG khi chấm SF/SC/SQ.
-5. fact_check_source_url: ghi TẤT CẢ URL thực sự dùng để verify, mỗi URL 1 dòng nếu có nhiều.
+5. fact_check_source_url: ghi TẤT CẢ URL thực sự dùng để verify kể cả URL tìm được qua web search khi RAG lỗi. Khi URL RAG không truy cập được, ghi URL thay thế bạn thực sự dùng — KHÔNG ghi lại URL gốc lỗi mà không kèm URL đã verify được. Mỗi URL 1 dòng.
 6. XAC NHAN: chỉ khi TẤT CẢ chi tiết và con số trong claim đều được xác nhận đầy đủ. Bất kỳ chi tiết nào lệch → LECH.
 
 Không markdown. Không giải thích. Chỉ JSON thuần mỗi lần.
@@ -236,9 +236,9 @@ def build_claim_prompt(claim_idx: int, total_claims: int,
         url_block = "URL RAG của claim này:\n" + "\n".join(claim_urls)
         url_block += "\n→ SF, SC, SQ phải phản ánh URL RAG trên (không phải URL web search)."
         if all_bad:
-            url_block += "\n\n⚠️ Tất cả URL RAG không truy cập được — BẮT BUỘC web search để verify. SF=0.05, SC=0.05 vì RAG không hỗ trợ; SQ vẫn chấm theo tên miền URL RAG."
+            url_block += "\n\n⚠️ Tất cả URL RAG không truy cập được — BẮT BUỘC web search để verify. SF=0.05, SC=0.05 vì RAG không hỗ trợ; SQ vẫn chấm theo tên miền URL RAG.\nfact_check_source_url: ghi URL bạn thực sự tìm và đọc được qua web search — KHÔNG ghi lại URL gốc đã đánh dấu lỗi."
         else:
-            url_block += "\nNếu URL RAG không chứa nội dung claim → SF thấp, SC thấp; dùng web search để verify fact-check và chấm HR."
+            url_block += "\nNếu URL RAG không chứa nội dung claim → SF thấp, SC thấp; dùng web search để verify fact-check và chấm HR.\nNếu URL RAG lỗi và bạn tìm được URL thay thế qua web search, ghi URL thay thế đó vào fact_check_source_url bên cạnh URL RAG gốc."
     else:
         url_block = "URL RAG: (không có) — BẮT BUỘC web search để tìm nguồn verify claim. SF=0.05, SC=0.05."
 
