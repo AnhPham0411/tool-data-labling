@@ -183,13 +183,21 @@ Schema JSON 1 claim:
   "claim": "nội dung claim nguyên văn",
   "risk_level": "CRITICAL|STANDARD|GENERAL",
   "fact_check_status": "XAC NHAN|LECH|MAU THUAN|OUTDATED|KHONG TIM THAY|KHONG TIM THAY + ESCALATE|BO QUA|ERROR",
-  "fact_check_source_url": "https://... (URL bạn dùng để verify)",
+  "fact_check_source_url": "https://url1\\nhttps://url2 (URL RAG + web search nếu dùng; nhiều URL thì mỗi URL 1 dòng)",
   "source_fidelity": 0.00,
   "source_coverage": 0.00,
   "hallucination_rate": 0.00,
   "source_quality": 0.00,
   "notes": "RISK=...: ...\\nSF=...: ...\\nSC=...: ...\\nHR=...: ...\\nSQ=...: ...\\nTXT=...: ..."
 }}
+
+Quy tắc bắt buộc:
+1. ĐỘC LẬP: Mỗi claim xử lý hoàn toàn độc lập — KHÔNG tái sử dụng notes, status, SF/SC/HR/SQ của claim trước.
+2. SF & SC: chấm dựa trên URL RAG gắn kèm claim. Nếu RAG không chứa nội dung claim → SF thấp, SC thấp.
+3. SQ: chấm theo tên miền URL RAG, không phải tên miền nguồn web search.
+4. Web search: chỉ dùng cho FACT-CHECK status và HR. KHÔNG thay thế nguồn RAG khi chấm SF/SC/SQ.
+5. fact_check_source_url: ghi TẤT CẢ URL thực sự dùng để verify, mỗi URL 1 dòng nếu có nhiều.
+6. XAC NHAN: chỉ khi TẤT CẢ chi tiết và con số trong claim đều được xác nhận đầy đủ. Bất kỳ chi tiết nào lệch → LECH.
 
 Không markdown. Không giải thích. Chỉ JSON thuần mỗi lần.
 Xác nhận bạn đã hiểu quy trình."""
@@ -225,15 +233,16 @@ def build_claim_prompt(claim_idx: int, total_claims: int,
     all_bad = len(claim_urls) > 0 and n_bad == len(claim_urls)
 
     if claim_urls:
-        url_block = "URL nguồn của claim này:\n" + "\n".join(claim_urls)
+        url_block = "URL RAG của claim này:\n" + "\n".join(claim_urls)
+        url_block += "\n→ SF, SC, SQ phải phản ánh URL RAG trên (không phải URL web search)."
         if all_bad:
-            url_block += "\n\n⚠️ Tất cả URL đều không truy cập được hoặc không liên quan — BẮT BUỘC web search để verify claim trước khi chấm điểm. Không được trả kết quả mà không search."
+            url_block += "\n\n⚠️ Tất cả URL RAG không truy cập được — BẮT BUỘC web search để verify. SF=0.05, SC=0.05 vì RAG không hỗ trợ; SQ vẫn chấm theo tên miền URL RAG."
         else:
-            url_block += "\n\nNếu URL không truy cập được hoặc nội dung không liên quan → vẫn phải web search để verify."
+            url_block += "\nNếu URL RAG không chứa nội dung claim → SF thấp, SC thấp; dùng web search để verify fact-check và chấm HR."
     else:
-        url_block = "URL nguồn: (không có) — BẮT BUỘC web search để tìm nguồn verify claim."
+        url_block = "URL RAG: (không có) — BẮT BUỘC web search để tìm nguồn verify claim. SF=0.05, SC=0.05."
 
-    return f"""[Claim {claim_idx}/{total_claims}]
+    return f"""⚠️ CLAIM ĐỘC LẬP {claim_idx}/{total_claims} — KHÔNG tái sử dụng kết quả claim trước.
 {text}
 
 {url_block}
