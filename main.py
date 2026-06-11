@@ -995,7 +995,10 @@ class App:
                     all_paras.append(para)
 
             claim_ps = [
-                build_claim_prompt(i + 1, n_claims, para, all_urls, url_status)
+                build_claim_prompt(
+                    i + 1, n_claims, para, all_urls, url_status,
+                    prev_para=all_paras[i - 1] if i > 0 else None,
+                )
                 for i, para in enumerate(all_paras)
             ]
 
@@ -1147,6 +1150,61 @@ class App:
 VALID_STATUSES = {"XAC NHAN", "LECH", "MAU THUAN", "OUTDATED", "KHONG TIM THAY",
                   "KHONG TIM THAY + ESCALATE", "BO QUA", "ERROR"}
 
+def _detect_carryover(claims: list, log_fn, window: int = 3) -> None:
+    """
+    Phát hiện carry-over: nếu `window` claim liên tiếp có cùng fact_check_source_url
+    VÀ cùng bộ score (SF/SC/HR/SQ trong ngưỡng 0.01) → flag carry-over.
+    Chỉ áp dụng khi các claim có nội dung text khác nhau đáng kể.
+    """
+    if len(claims) < window:
+        return
+
+    _SCORE_FIELDS = ("source_fidelity", "source_coverage",
+                     "hallucination_rate", "source_quality")
+
+    def _scores_eq(a: dict, b: dict) -> bool:
+        for f in _SCORE_FIELDS:
+            try:
+                if abs(float(a.get(f, 0)) - float(b.get(f, 0))) > 0.01:
+                    return False
+            except (TypeError, ValueError):
+                return False
+        return True
+
+    def _url_eq(a: dict, b: dict) -> bool:
+        u_a = (a.get("fact_check_source_url") or "").strip().split("\n")[0]
+        u_b = (b.get("fact_check_source_url") or "").strip().split("\n")[0]
+        return bool(u_a) and u_a == u_b
+
+    def _texts_differ(a: dict, b: dict) -> bool:
+        ta = (a.get("claim") or "")[:40].lower()
+        tb = (b.get("claim") or "")[:40].lower()
+        return ta != tb
+
+    run_start = 0
+    for i in range(1, len(claims)):
+        same = _url_eq(claims[i], claims[run_start]) and _scores_eq(claims[i], claims[run_start])
+        if same:
+            run_len = i - run_start + 1
+            if run_len >= window:
+                # Chỉ cảnh báo nếu các claim thực sự khác nhau về nội dung
+                texts_differ = any(
+                    _texts_differ(claims[j], claims[j + 1])
+                    for j in range(run_start, i)
+                )
+                if texts_differ and run_len == window:
+                    indices = list(range(run_start + 1, i + 2))
+                    url_preview = (claims[run_start].get("fact_check_source_url") or "")[:60]
+                    log_fn(
+                        f"  ⚠ CARRY-OVER nghi ngờ: claim {indices} có cùng URL+score "
+                        f"dù nội dung khác nhau.",
+                        "warn",
+                    )
+                    log_fn(f"    URL lặp: {url_preview}", "warn")
+        else:
+            run_start = i
+
+
 def _validate_claims(claims: list, log_fn) -> None:
     """Cảnh báo các claim có dữ liệu bất thường — không raise, chỉ log."""
     issues = []
@@ -1180,6 +1238,8 @@ def _validate_claims(claims: list, log_fn) -> None:
             log_fn(iss, "warn")
         if len(issues) > 8:
             log_fn(f"  ... và {len(issues)-8} cảnh báo khác", "warn")
+
+    _detect_carryover(claims, log_fn)
 
 
 # ─── Chrome utils ─────────────────────────────────────────────────────────────

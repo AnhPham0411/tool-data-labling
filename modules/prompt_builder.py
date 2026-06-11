@@ -205,7 +205,8 @@ Xác nhận bạn đã hiểu quy trình."""
 
 def build_claim_prompt(claim_idx: int, total_claims: int,
                        para: dict, all_urls: list[str],
-                       url_status: dict) -> str:
+                       url_status: dict,
+                       prev_para: dict | None = None) -> str:
     """
     Gửi 1 claim — bao gồm text đầy đủ + tất cả URL của claim đó.
 
@@ -213,6 +214,7 @@ def build_claim_prompt(claim_idx: int, total_claims: int,
     para      : {"text": str, "citations": [int, ...]}  (citations là 1-based)
     all_urls  : toàn bộ URL từ ref_parser
     url_status: {url: "OK (200)" | "HTTP_404" | ...}
+    prev_para : para của claim liền trước — dùng để nhắc Claude chuyển ngữ cảnh
     """
     text = para.get("text", "")
     cits = para.get("citations", [])  # 1-based indices vào all_urls
@@ -242,8 +244,19 @@ def build_claim_prompt(claim_idx: int, total_claims: int,
     else:
         url_block = "URL RAG: (không có) — BẮT BUỘC web search để tìm nguồn verify claim. SF=0.05, SC=0.05."
 
+    # Nhắc Claude chuyển ngữ cảnh khỏi claim trước
+    if prev_para:
+        prev_snippet = prev_para.get("text", "")[:80].rstrip()
+        context_switch = (
+            f"Claim trước (#{claim_idx - 1}) nói về: \"{prev_snippet}...\"\n"
+            f"Claim hiện tại (#{claim_idx}) có nội dung KHÁC — "
+            f"bắt đầu lại từ đầu, KHÔNG dùng URL/score/notes của claim trước.\n\n"
+        )
+    else:
+        context_switch = ""
+
     return f"""⚠️ CLAIM ĐỘC LẬP {claim_idx}/{total_claims} — KHÔNG tái sử dụng kết quả claim trước.
-{text}
+{context_switch}{text}
 
 {url_block}
 
